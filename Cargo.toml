@@ -1,0 +1,19 @@
+[package]
+name = "jupyter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Jupyter notebooks for the rhun editor: reads and writes .ipynb and runs cells in Jupyter kernels."
+
+[dependencies]
+rhun-ext = { path = "../extension-protocol/rust/rhun-ext" }
+serde = "1"
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

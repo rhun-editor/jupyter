@@ -1,0 +1,376 @@
+//! rhun's jupyter extension: opens and saves .ipynb notebooks and runs their cells in Jupyter
+//! kernels (ipykernel in the project's Python environment, or an installed kernelspec).
+
+mod ipynb;
+mod kernel;
+mod zmtp;
+
+use kernel::{Candidate, Kernel, Op, Sink};
+use rhun_ext::notebook::{
+    CellId, KernelState, NbId, NbOpen, NbRun, NbSave, Notebook, Output, OutputOp, RunId, RunState,
+};
+use rhun_ext::{Ext, Feature, Handler};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+struct ExtSink(Ext);
+
+impl Sink for ExtSink {
+    fn state(&self, nb: NbId, cell: CellId, run: RunId, state: RunState, count: Option<u64>) {
+        let _ = self.0.nb_state(nb, cell, run, state, count);
+    }
+    fn output(&self, nb: NbId, cell: CellId, run: RunId, op: Op, out: Option<&Output>) {
+        let op = match &op {
+            Op::Append => OutputOp::Append,
+            Op::ReplaceId(id) => OutputOp::ReplaceId(id),
+            Op::Clear => OutputOp::Clear,
+            Op::ClearWait => OutputOp::ClearWait,
+        };
+        let _ = self.0.nb_output(nb, cell, run, op, out);
+    }
+    fn stream(&self, nb: NbId, cell: CellId, run: RunId, stderr: bool, text: &str) {
+        let _ = self.0.nb_stream(nb, cell, run, stderr, text.as_bytes());
+    }
+    fn label(&self, nb: NbId, state: KernelState, label: &str) {
+        let _ = self.0.nb_kernel_label(nb, state, label);
+    }
+}
+
+enum Ks {
+    None,
+    Starting,
+    Ready(Arc<Kernel>),
+}
+
+/// A notebook rhun has open.
+struct Nb {
+    path: PathBuf,
+    /// metadata.kernelspec's name and display_name when the file has them
+    spec_name: Option<String>,
+    spec_label: Option<String>,
+    choice: Option<Candidate>,
+    /// the user picked the kernel: its kernelspec goes in the file
+    picked: bool,
+    kernel: Ks,
+    queue: Vec<NbRun>,
+    /// language_info of the last kernel that ran, for the file
+    lang_info: Option<Value>,
+}
+
+impl Nb {
+    fn new(path: PathBuf) -> Nb {
+        Nb {
+            path,
+            spec_name: None,
+            spec_label: None,
+            choice: None,
+            picked: false,
+            kernel: Ks::None,
+            queue: Vec::new(),
+            lang_info: None,
+        }
+    }
+}
+
+type Nbs = Arc<Mutex<HashMap<NbId, Nb>>>;
+
+#[derive(Clone)]
+struct Ctx {
+    nbs: Nbs,
+    sink: Arc<dyn Sink>,
+    project: Option<PathBuf>,
+    state: PathBuf,
+}
+
+struct App {
+    nbs: Nbs,
+    project: Option<PathBuf>,
+    state: PathBuf,
+    sink: Option<Arc<dyn Sink>>,
+}
+
+const NO_KERNEL: &str = "No Python with ipykernel was found. Make an environment in the project \
+and install ipykernel in it:\n    python3 -m venv .venv\n    .venv/bin/python -m pip install ipykernel\n\
+then run the cell again, or pick a kernel with the kernel button.";
+
+impl Ctx {
+    fn dir_of(&self, nb: NbId) -> PathBuf {
+        let nbs = self.nbs.lock().unwrap();
+        nbs.get(&nb)
+            .and_then(|n| n.path.parent().map(Path::to_path_buf))
+            .filter(|p| !p.as_os_str().is_empty())
+            .or_else(|| self.project.clone())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn fail_runs(&self, nb: NbId, runs: &[NbRun], why: &str) {
+        for r in runs {
+            self.sink.output(nb, r.cell, r.run, Op::Append, Some(&kernel::message_output(why)));
+            self.sink.state(nb, r.cell, r.run, RunState::Failed, None);
+        }
+    }
+
+    /// Starts the notebook's kernel (its choice, else the default one) and runs what queued
+    /// meanwhile. Called on a thread of its own with the notebook marked Starting.
+    fn start(&self, nb: NbId) {
+        let dir = self.dir_of(nb);
+        let (choice, spec_name) = {
+            let nbs = self.nbs.lock().unwrap();
+            let Some(n) = nbs.get(&nb) else { return };
+            (n.choice.clone(), n.spec_name.clone())
+        };
+        let choice = choice.or_else(|| kernel::default_choice(&kernel::discover(&dir, self.project.as_deref()), spec_name.as_deref()));
+        let Some(cand) = choice else {
+            let runs = self.stop_starting(nb);
+            self.sink.label(nb, KernelState::Dead, "No kernel");
+            self.fail_runs(nb, &runs, NO_KERNEL);
+            return;
+        };
+        self.sink.label(nb, KernelState::Starting, &cand.label);
+        match Kernel::start(nb, &cand, &dir, &self.state, self.sink.clone()) {
+            Ok(k) => {
+                let mut nbs = self.nbs.lock().unwrap();
+                let Some(n) = nbs.get_mut(&nb) else {
+                    drop(nbs);
+                    k.shutdown(false);
+                    return;
+                };
+                n.choice = Some(cand.clone());
+                n.lang_info = k.language_info();
+                let queue = std::mem::take(&mut n.queue);
+                n.kernel = Ks::Ready(k.clone());
+                let mut failed = Vec::new();
+                for r in queue {
+                    if let Err(e) = k.execute(r.cell, r.run, &String::from_utf8_lossy(&r.source)) {
+                        failed.push((r, e));
+                    }
+                }
+                drop(nbs);
+                if !k.busy() {
+                    self.sink.label(nb, KernelState::Idle, &cand.label);
+                }
+                for (r, e) in failed {
+                    self.fail_runs(nb, &[r], &format!("The cell could not be sent to the kernel: {e}"));
+                }
+            }
+            Err(e) => {
+                let runs = self.stop_starting(nb);
+                self.sink.label(nb, KernelState::Dead, &format!("{} (failed)", cand.label));
+                self.fail_runs(nb, &runs, &format!("The kernel {} did not start: {e}", cand.label));
+            }
+        }
+    }
+
+    /// The runs waiting for a kernel that is not coming.
+    fn stop_starting(&self, nb: NbId) -> Vec<NbRun> {
+        let mut nbs = self.nbs.lock().unwrap();
+        match nbs.get_mut(&nb) {
+            Some(n) => {
+                n.kernel = Ks::None;
+                std::mem::take(&mut n.queue)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Stops the notebook's kernel (its runs are cancelled) and starts it again, or the kernel
+    /// the user picked.
+    fn restart(&self, nb: NbId) {
+        let old = {
+            let mut nbs = self.nbs.lock().unwrap();
+            let Some(n) = nbs.get_mut(&nb) else { return };
+            match std::mem::replace(&mut n.kernel, Ks::Starting) {
+                Ks::Ready(k) => Some(k),
+                Ks::Starting => {
+                    // a start already under way runs what queues
+                    return;
+                }
+                Ks::None => None,
+            }
+        };
+        if let Some(k) = old {
+            k.shutdown(true);
+            for (cell, run) in k.take_runs() {
+                self.sink.state(nb, cell, run, RunState::Cancelled, None);
+            }
+        }
+        self.start(nb);
+    }
+}
+
+impl App {
+    fn ctx(&mut self, ext: &Ext) -> Ctx {
+        let sink = self.sink.get_or_insert_with(|| Arc::new(ExtSink(ext.clone()))).clone();
+        Ctx { nbs: self.nbs.clone(), sink, project: self.project.clone(), state: self.state.clone() }
+    }
+}
+
+impl Handler for App {
+    fn ready(&mut self, _ext: &Ext, project: Option<&str>) {
+        self.project = project.map(PathBuf::from);
+    }
+
+    fn nb_open(&mut self, ext: &Ext, req: &NbOpen) -> Result<Notebook, String> {
+        let nb = ipynb::read(&req.data)?;
+        let meta: Value = serde_json::from_slice(&nb.meta).unwrap_or(Value::Null);
+        let spec = meta.get("metadata").and_then(|m| m.get("kernelspec"));
+        let mut n = Nb::new(PathBuf::from(&req.path));
+        n.spec_name = spec.and_then(|s| s.get("name")).and_then(|v| v.as_str()).map(str::to_string);
+        n.spec_label = spec.and_then(|s| s.get("display_name")).and_then(|v| v.as_str()).map(str::to_string);
+        let label = n.spec_label.clone().unwrap_or_else(|| "Python".to_string());
+        let ctx = self.ctx(ext);
+        let id = req.nb;
+        let mut nbs = self.nbs.lock().unwrap();
+        match nbs.get_mut(&id) {
+            // opened again (a reload): the kernel stays
+            Some(old) => {
+                old.path = n.path;
+                old.spec_name = n.spec_name;
+                old.spec_label = n.spec_label;
+            }
+            None => {
+                nbs.insert(id, n);
+                thread::spawn(move || ctx.sink.label(id, KernelState::None, &label));
+            }
+        }
+        Ok(nb)
+    }
+
+    fn nb_save(&mut self, _ext: &Ext, req: &NbSave) -> Result<Vec<u8>, String> {
+        let mut nbs = self.nbs.lock().unwrap();
+        let mut patch: Vec<(&str, Value)> = Vec::new();
+        if let Some(n) = nbs.get_mut(&req.nb) {
+            n.path = PathBuf::from(&req.path);
+            if let Some(li) = &n.lang_info {
+                patch.push(("language_info", li.clone()));
+            }
+            if let (Some(c), true) = (&n.choice, n.picked || n.spec_name.is_none()) {
+                if matches!(n.kernel, Ks::Ready(_)) || n.picked {
+                    patch.push((
+                        "kernelspec",
+                        serde_json::json!({"display_name": c.display_name, "language": c.language, "name": c.spec_name}),
+                    ));
+                }
+            }
+        }
+        ipynb::write(&req.notebook, &patch)
+    }
+
+    fn nb_run(&mut self, ext: &Ext, run: &NbRun) {
+        let ctx = self.ctx(ext);
+        ctx.sink.state(run.nb, run.cell, run.run, RunState::Queued, None);
+        let mut nbs = self.nbs.lock().unwrap();
+        let n = nbs.entry(run.nb).or_insert_with(|| Nb::new(PathBuf::new()));
+        match &n.kernel {
+            Ks::Ready(k) => {
+                let k = k.clone();
+                if let Err(e) = k.execute(run.cell, run.run, &String::from_utf8_lossy(&run.source)) {
+                    drop(nbs);
+                    ctx.fail_runs(run.nb, std::slice::from_ref(run), &format!("The cell could not be sent to the kernel: {e}"));
+                }
+            }
+            Ks::Starting => n.queue.push(run.clone()),
+            Ks::None => {
+                n.queue.push(run.clone());
+                n.kernel = Ks::Starting;
+                let id = run.nb;
+                thread::spawn(move || ctx.start(id));
+            }
+        }
+    }
+
+    fn nb_interrupt(&mut self, ext: &Ext, nb: NbId) {
+        let ctx = self.ctx(ext);
+        let mut nbs = self.nbs.lock().unwrap();
+        let Some(n) = nbs.get_mut(&nb) else { return };
+        match &n.kernel {
+            Ks::Ready(k) => k.interrupt(),
+            Ks::Starting => {
+                let runs = std::mem::take(&mut n.queue);
+                drop(nbs);
+                for r in runs {
+                    ctx.sink.state(nb, r.cell, r.run, RunState::Cancelled, None);
+                }
+            }
+            Ks::None => {}
+        }
+    }
+
+    fn nb_restart(&mut self, ext: &Ext, nb: NbId) {
+        let ctx = self.ctx(ext);
+        thread::spawn(move || ctx.restart(nb));
+    }
+
+    fn nb_kernel(&mut self, ext: &Ext, nb: NbId) {
+        let ctx = self.ctx(ext);
+        let ext = ext.clone();
+        thread::spawn(move || {
+            let dir = ctx.dir_of(nb);
+            let cands = kernel::discover(&dir, ctx.project.as_deref());
+            if cands.is_empty() {
+                let _ = ext.toast("No Python was found on PATH or in the project's environments");
+                return;
+            }
+            let current = ctx.nbs.lock().unwrap().get(&nb).and_then(|n| n.choice.as_ref().map(|c| c.argv.clone()));
+            let items: Vec<String> = cands
+                .iter()
+                .map(|c| {
+                    let mut s = c.label.clone();
+                    if current.as_ref() == Some(&c.argv) {
+                        s.push_str(" (current)");
+                    }
+                    if !c.problem.is_empty() {
+                        s.push_str(" - no ipykernel");
+                    }
+                    s
+                })
+                .collect();
+            let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+            let name = ctx.nbs.lock().unwrap().get(&nb).and_then(|n| n.path.file_name().map(|f| f.to_string_lossy().into_owned())).unwrap_or_default();
+            let Ok(Some(i)) = ext.choose(&format!("Kernel for {name}"), &refs) else { return };
+            let Some(cand) = cands.get(i).cloned() else { return };
+            {
+                let mut nbs = ctx.nbs.lock().unwrap();
+                let Some(n) = nbs.get_mut(&nb) else { return };
+                n.choice = Some(cand);
+                n.picked = true;
+            }
+            ctx.restart(nb);
+        });
+    }
+
+    fn nb_closed(&mut self, _ext: &Ext, nb: NbId) {
+        let n = self.nbs.lock().unwrap().remove(&nb);
+        if let Some(Nb { kernel: Ks::Ready(k), .. }) = n {
+            thread::spawn(move || k.shutdown(false));
+        }
+    }
+
+    fn bye(&mut self, _ext: &Ext) {
+        let all: Vec<Nb> = self.nbs.lock().unwrap().drain().map(|(_, n)| n).collect();
+        let hs: Vec<_> = all
+            .into_iter()
+            .filter_map(|n| match n.kernel {
+                Ks::Ready(k) => Some(thread::spawn(move || k.shutdown(false))),
+                _ => None,
+            })
+            .collect();
+        for h in hs {
+            let _ = h.join();
+        }
+    }
+}
+
+fn main() {
+    let state = std::env::var_os("RHUN_STATE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let app = App { nbs: Arc::new(Mutex::new(HashMap::new())), project: None, state, sink: None };
+    if let Err(e) = rhun_ext::run(&[Feature::Notebooks], app) {
+        eprintln!("jupyter: {e}");
+    }
+}
