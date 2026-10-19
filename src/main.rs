@@ -5,9 +5,10 @@ mod ipynb;
 mod kernel;
 mod zmtp;
 
-use kernel::{Candidate, Kernel, Op, Sink};
+use kernel::{Candidate, Kernel, Launcher, LocalLauncher, Op, Proc, Sink};
 use rhun_ext::notebook::{
-    CellId, KernelState, NbId, NbOpen, NbRun, NbSave, Notebook, Output, OutputOp, RunId, RunState,
+    CellId, Command, ExecId, ExecSignal, KernelState, NbId, NbOpen, NbRun, NbSave, Notebook, Output, OutputOp, RunId,
+    RunState,
 };
 use rhun_ext::{Ext, Feature, Handler};
 use serde_json::Value;
@@ -36,6 +37,62 @@ impl Sink for ExtSink {
     }
     fn label(&self, nb: NbId, state: KernelState, label: &str) {
         let _ = self.0.nb_kernel_label(nb, state, label);
+    }
+}
+
+/// Kernels run as the user, started by rhun (nb-exec): DECISIONS 1. A rhun without nb-exec
+/// (`unknown`) gets kernels the extension starts itself, inside its sandbox.
+struct ExecLauncher {
+    ext: Ext,
+    state: PathBuf,
+    /// EXEC -> exit status (None: rhun ended it), filled by nb-exec-exit
+    exits: Arc<Mutex<HashMap<ExecId, Option<i32>>>>,
+}
+
+struct ExecProc {
+    ext: Ext,
+    exec: ExecId,
+    log: PathBuf,
+    exits: Arc<Mutex<HashMap<ExecId, Option<i32>>>>,
+}
+
+impl Launcher for ExecLauncher {
+    fn launch(&self, nb: NbId, argv: &[String], cwd: &Path, env: &[(String, String)], log: &Path) -> Result<Box<dyn Proc>, String> {
+        let cmd = Command {
+            program: argv[0].clone(),
+            dir: cwd.display().to_string(),
+            args: argv[1..].to_vec(),
+            env: env.iter().map(|(k, v)| format!("{k}={v}")).collect(),
+        };
+        match self.ext.nb_exec(nb, &cmd) {
+            Ok(exec) => Ok(Box::new(ExecProc {
+                ext: self.ext.clone(),
+                exec,
+                log: self.state.join(format!("kernel-{exec}.log")),
+                exits: self.exits.clone(),
+            })),
+            Err(e) if e.code == "unknown" => LocalLauncher.launch(nb, argv, cwd, env, log),
+            Err(e) if e.code == "needs" => Err(format!(
+                "this extension may not start {} as a kernel ([needs] kernels in its manifest)",
+                argv[0]
+            )),
+            Err(e) => Err(e.text),
+        }
+    }
+}
+
+impl Proc for ExecProc {
+    fn exited(&self) -> bool {
+        self.exits.lock().unwrap().contains_key(&self.exec)
+    }
+    fn interrupt(&self) -> bool {
+        self.ext.nb_exec_signal(self.exec, ExecSignal::Interrupt).is_ok()
+    }
+    fn kill(&self) {
+        let _ = self.ext.nb_exec_signal(self.exec, ExecSignal::Kill);
+    }
+    fn log(&self) -> PathBuf {
+        self.log.clone()
     }
 }
 
@@ -81,6 +138,7 @@ type Nbs = Arc<Mutex<HashMap<NbId, Nb>>>;
 struct Ctx {
     nbs: Nbs,
     sink: Arc<dyn Sink>,
+    launcher: Arc<dyn Launcher>,
     project: Option<PathBuf>,
     state: PathBuf,
 }
@@ -90,6 +148,8 @@ struct App {
     project: Option<PathBuf>,
     state: PathBuf,
     sink: Option<Arc<dyn Sink>>,
+    launcher: Option<Arc<dyn Launcher>>,
+    exits: Arc<Mutex<HashMap<ExecId, Option<i32>>>>,
 }
 
 const NO_KERNEL: &str = "No Python with ipykernel was found. Make an environment in the project \
@@ -130,7 +190,7 @@ impl Ctx {
             return;
         };
         self.sink.label(nb, KernelState::Starting, &cand.label);
-        match Kernel::start(nb, &cand, &dir, &self.state, self.sink.clone()) {
+        match Kernel::start(nb, &cand, &dir, &self.state, self.sink.clone(), self.launcher.as_ref()) {
             Ok(k) => {
                 let mut nbs = self.nbs.lock().unwrap();
                 let Some(n) = nbs.get_mut(&nb) else {
@@ -204,7 +264,12 @@ impl Ctx {
 impl App {
     fn ctx(&mut self, ext: &Ext) -> Ctx {
         let sink = self.sink.get_or_insert_with(|| Arc::new(ExtSink(ext.clone()))).clone();
-        Ctx { nbs: self.nbs.clone(), sink, project: self.project.clone(), state: self.state.clone() }
+        let (exits, state) = (self.exits.clone(), self.state.clone());
+        let launcher = self
+            .launcher
+            .get_or_insert_with(|| Arc::new(ExecLauncher { ext: ext.clone(), state, exits }))
+            .clone();
+        Ctx { nbs: self.nbs.clone(), sink, launcher, project: self.project.clone(), state: self.state.clone() }
     }
 }
 
@@ -342,6 +407,10 @@ impl Handler for App {
         });
     }
 
+    fn nb_exec_exit(&mut self, _ext: &Ext, exec: ExecId, code: Option<i32>) {
+        self.exits.lock().unwrap().insert(exec, code);
+    }
+
     fn nb_closed(&mut self, _ext: &Ext, nb: NbId) {
         let n = self.nbs.lock().unwrap().remove(&nb);
         if let Some(Nb { kernel: Ks::Ready(k), .. }) = n {
@@ -369,7 +438,14 @@ fn main() {
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    let app = App { nbs: Arc::new(Mutex::new(HashMap::new())), project: None, state, sink: None };
+    let app = App {
+        nbs: Arc::new(Mutex::new(HashMap::new())),
+        project: None,
+        state,
+        sink: None,
+        launcher: None,
+        exits: Arc::new(Mutex::new(HashMap::new())),
+    };
     if let Err(e) = rhun_ext::run(&[Feature::Notebooks], app) {
         eprintln!("jupyter: {e}");
     }

@@ -265,7 +265,12 @@ pub fn discover(dir: &Path, project: Option<&Path>) -> Vec<Candidate> {
     let mut out = Vec::new();
     let mut prefixes: Vec<String> = Vec::new();
     for (py, shown) in pythons {
-        let Some(pr) = probe(&py) else { continue };
+        // a Python the sandbox cannot run is still offered: the kernel runs as the user
+        let pr = probe(&py).unwrap_or(Probe {
+            version: "3".into(),
+            prefix: py.display().to_string(),
+            ipykernel: true,
+        });
         // python3 and python on PATH are often one environment
         if prefixes.contains(&pr.prefix) {
             continue;
@@ -364,14 +369,91 @@ struct Shared {
     kstate: Option<KernelState>,
 }
 
+/// A running kernel process: started by rhun as the user (nb-exec), or by the extension itself.
+pub trait Proc: Send + Sync {
+    fn exited(&self) -> bool;
+    /// SIGINT to it; false when that cannot be done (Windows): the interrupt message then.
+    fn interrupt(&self) -> bool;
+    fn kill(&self);
+    /// Where its output goes.
+    fn log(&self) -> PathBuf;
+}
+
+/// Starts kernel processes.
+pub trait Launcher: Send + Sync {
+    fn launch(&self, nb: NbId, argv: &[String], cwd: &Path, env: &[(String, String)], log: &Path) -> Result<Box<dyn Proc>, String>;
+}
+
+/// The extension starts the kernel itself, inside its own sandbox (tests, and a rhun without
+/// nb-exec).
+pub struct LocalLauncher;
+
+struct LocalProc {
+    child: Mutex<Child>,
+    log: PathBuf,
+}
+
+impl Launcher for LocalLauncher {
+    fn launch(&self, _nb: NbId, argv: &[String], cwd: &Path, env: &[(String, String)], log: &Path) -> Result<Box<dyn Proc>, String> {
+        let logf = fs::File::create(log).map_err(|e| e.to_string())?;
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(logf.try_clone().map_err(|e| e.to_string())?)
+            .stderr(logf)
+            .envs(env.iter().map(|(k, v)| (k, v)));
+        let child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", argv[0]))?;
+        Ok(Box::new(LocalProc { child: Mutex::new(child), log: log.to_path_buf() }))
+    }
+}
+
+impl Proc for LocalProc {
+    fn exited(&self) -> bool {
+        !matches!(self.child.lock().unwrap().try_wait(), Ok(None))
+    }
+    fn interrupt(&self) -> bool {
+        #[cfg(unix)]
+        {
+            extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            let pid = self.child.lock().unwrap().id() as i32;
+            unsafe { kill(pid, 2) == 0 }
+        }
+        #[cfg(not(unix))]
+        false
+    }
+    fn kill(&self) {
+        let mut c = self.child.lock().unwrap();
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    fn log(&self) -> PathBuf {
+        self.log.clone()
+    }
+}
+
+/// The id of the extension's parent (rhun), for the kernel's parent polling.
+pub fn parent_pid() -> u32 {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn getppid() -> i32;
+        }
+        unsafe { getppid() as u32 }
+    }
+    #[cfg(not(unix))]
+    std::process::id()
+}
+
 pub struct Kernel {
     pub nb: NbId,
     pub cand: Candidate,
     sink: Arc<dyn Sink>,
     key: Vec<u8>,
     session: String,
-    child: Mutex<Option<Child>>,
-    pid: u32,
+    proc_: Box<dyn Proc>,
     shell: Mutex<Socket>,
     control: Mutex<Socket>,
     iopub: Socket,
@@ -379,7 +461,6 @@ pub struct Kernel {
     cv: Condvar,
     stopping: AtomicBool,
     conn_file: PathBuf,
-    log: PathBuf,
 }
 
 fn free_ports(n: usize) -> std::io::Result<Vec<u16>> {
@@ -470,7 +551,14 @@ pub fn message_output(text: &str) -> Output {
 
 impl Kernel {
     /// Starts the candidate for notebook `nb` with `cwd` its folder; files go in `state`.
-    pub fn start(nb: NbId, cand: &Candidate, cwd: &Path, state: &Path, sink: Arc<dyn Sink>) -> Result<Arc<Kernel>, String> {
+    pub fn start(
+        nb: NbId,
+        cand: &Candidate,
+        cwd: &Path,
+        state: &Path,
+        sink: Arc<dyn Sink>,
+        launcher: &dyn Launcher,
+    ) -> Result<Arc<Kernel>, String> {
         if !cand.problem.is_empty() {
             return Err(cand.problem.clone());
         }
@@ -486,28 +574,27 @@ impl Kernel {
         });
         fs::write(&conn_file, serde_json::to_vec_pretty(&conn).unwrap()).map_err(|e| format!("cannot write {}: {e}", conn_file.display()))?;
         let argv: Vec<String> = cand.argv.iter().map(|a| a.replace("{connection_file}", &conn_file.display().to_string())).collect();
-        let logf = fs::File::create(&log).map_err(|e| e.to_string())?;
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..])
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(logf.try_clone().map_err(|e| e.to_string())?)
-            .stderr(logf)
-            .env("JPY_PARENT_PID", std::process::id().to_string())
-            .env("PYDEVD_DISABLE_FILE_VALIDATION", "1");
-        for (k, v) in &cand.env {
-            cmd.env(k, v);
-        }
-        let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", argv[0]))?;
-        let pid = child.id();
+        let mut env = vec![
+            ("JPY_PARENT_PID".to_string(), parent_pid().to_string()),
+            ("PYDEVD_DISABLE_FILE_VALIDATION".to_string(), "1".to_string()),
+        ];
+        env.extend(cand.env.iter().cloned());
+        let proc_ = match launcher.launch(nb, &argv, cwd, &env, &log) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = fs::remove_file(&conn_file);
+                return Err(e);
+            }
+        };
+        let log = proc_.log();
         let deadline = Instant::now() + Duration::from_secs(60);
-        let connect = |port: u16, kind: &str, child: &mut Child| -> Result<Socket, String> {
+        let connect = |port: u16, kind: &str, proc_: &dyn Proc| -> Result<Socket, String> {
             loop {
                 match Socket::connect(port, kind) {
                     Ok(s) => return Ok(s),
                     Err(e) => {
-                        if let Ok(Some(st)) = child.try_wait() {
-                            return Err(format!("the kernel exited ({st}) before it was ready:\n{}", tail(&log, 20)));
+                        if proc_.exited() {
+                            return Err(format!("the kernel exited before it was ready:\n{}", tail(&log, 20)));
                         }
                         if Instant::now() > deadline {
                             return Err(format!("the kernel did not open its ports within 60 seconds ({e})"));
@@ -518,16 +605,15 @@ impl Kernel {
             }
         };
         let socks = (|| -> Result<(Socket, Socket, Socket), String> {
-            let iopub = connect(ports[1], "SUB", &mut child)?;
-            let shell = connect(ports[0], "DEALER", &mut child)?;
-            let control = connect(ports[3], "DEALER", &mut child)?;
+            let iopub = connect(ports[1], "SUB", proc_.as_ref())?;
+            let shell = connect(ports[0], "DEALER", proc_.as_ref())?;
+            let control = connect(ports[3], "DEALER", proc_.as_ref())?;
             Ok((iopub, shell, control))
         })();
         let (iopub, shell, control) = match socks {
             Ok(s) => s,
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                proc_.kill();
                 let _ = fs::remove_file(&conn_file);
                 return Err(e);
             }
@@ -538,8 +624,7 @@ impl Kernel {
             sink,
             key: key.into_bytes(),
             session: uuid(),
-            child: Mutex::new(Some(child)),
-            pid,
+            proc_,
             iopub: iopub.try_clone().map_err(|e| e.to_string())?,
             shell: Mutex::new(shell.try_clone().map_err(|e| e.to_string())?),
             control: Mutex::new(control.try_clone().map_err(|e| e.to_string())?),
@@ -547,7 +632,6 @@ impl Kernel {
             cv: Condvar::new(),
             stopping: AtomicBool::new(false),
             conn_file,
-            log,
         });
         for (sock, chan) in [(iopub, "iopub"), (shell, "shell"), (control, "control")] {
             let k = k.clone();
@@ -568,7 +652,7 @@ impl Kernel {
             drop(sh);
             if k.exited() || Instant::now() > deadline {
                 let why = if k.exited() {
-                    format!("the kernel exited before it was ready:\n{}", tail(&k.log, 20))
+                    format!("the kernel exited before it was ready:\n{}", tail(&k.proc_.log(), 20))
                 } else {
                     "the kernel did not answer within 60 seconds".to_string()
                 };
@@ -580,10 +664,7 @@ impl Kernel {
     }
 
     fn exited(&self) -> bool {
-        match self.child.lock().unwrap().as_mut() {
-            Some(c) => !matches!(c.try_wait(), Ok(None)),
-            None => true,
-        }
+        self.proc_.exited()
     }
 
     pub fn language_info(&self) -> Option<Value> {
@@ -644,14 +725,8 @@ impl Kernel {
 
     /// Interrupts the running cell: SIGINT, or interrupt_request where a signal cannot be sent.
     pub fn interrupt(&self) {
-        #[cfg(unix)]
-        if self.cand.signal_interrupt {
-            extern "C" {
-                fn kill(pid: i32, sig: i32) -> i32;
-            }
-            if unsafe { kill(self.pid as i32, 2) } == 0 {
-                return;
-            }
+        if self.cand.signal_interrupt && self.proc_.interrupt() {
+            return;
         }
         let _ = self.send(&self.control, "interrupt_request", json!({}));
     }
@@ -667,26 +742,17 @@ impl Kernel {
         self.stopping.store(true, Ordering::SeqCst);
         let _ = self.send(&self.control, "shutdown_request", json!({ "restart": restart }));
         let start = Instant::now();
-        let mut child = self.child.lock().unwrap();
-        if let Some(c) = child.as_mut() {
-            while start.elapsed() < Duration::from_secs(2) {
-                if !matches!(c.try_wait(), Ok(None)) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            if matches!(c.try_wait(), Ok(None)) {
-                let _ = c.kill();
-            }
-            let _ = c.wait();
+        while start.elapsed() < Duration::from_secs(2) && !self.proc_.exited() {
+            thread::sleep(Duration::from_millis(20));
         }
-        *child = None;
-        drop(child);
+        if !self.proc_.exited() {
+            self.proc_.kill();
+        }
         self.iopub.close();
         self.shell.lock().unwrap().close();
         self.control.lock().unwrap().close();
         let _ = fs::remove_file(&self.conn_file);
-        let _ = fs::remove_file(&self.log);
+        let _ = fs::remove_file(self.proc_.log());
     }
 
     fn set_kstate(&self, st: KernelState) {
@@ -729,7 +795,7 @@ impl Kernel {
             // the kernel went away without being asked
             self.stopping.store(true, Ordering::SeqCst);
             let runs = self.take_runs();
-            let why = format!("The kernel died. Restart it to run cells.\n{}", tail(&self.log, 10));
+            let why = format!("The kernel died. Restart it to run cells.\n{}", tail(&self.proc_.log(), 10));
             for (i, (cell, run)) in runs.iter().enumerate() {
                 if i == 0 {
                     self.sink.output(self.nb, *cell, *run, Op::Append, Some(&message_output(&why)));
@@ -738,10 +804,7 @@ impl Kernel {
             }
             self.shared.lock().unwrap().kstate = Some(KernelState::Dead);
             self.sink.label(self.nb, KernelState::Dead, &format!("{} (dead)", self.cand.label));
-            if let Some(c) = self.child.lock().unwrap().as_mut() {
-                let _ = c.kill();
-                let _ = c.wait();
-            }
+            self.proc_.kill();
         }
     }
 

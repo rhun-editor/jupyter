@@ -2,7 +2,8 @@
 """The jupyter extension in rhun with a real kernel: rhun runs headless with its control socket,
 the extension from this repository, and a project whose .venv has ipykernel, matplotlib and
 nbformat. Opens a notebook, runs cells (a stream and a result, a matplotlib figure, an exception,
-an interrupt, an updated display), saves, validates the file with nbformat, restarts the kernel;
+an interrupt, an updated display) in a kernel rhun starts as the user after asking (nb-exec),
+saves, validates the file with nbformat, restarts the kernel;
 and opens a file nbformat wrote, saving it back byte for byte.
 
     RHUN=/path/to/rhun JUPYTER_TEST_PROJECT=/path/to/project python3 tests/real.py
@@ -133,6 +134,18 @@ class RealKernel(unittest.TestCase):
             self.command('wait 100')
         self.fail(f'timed out; last: {out}')
 
+    def approve(self):
+        """The kernel runs as the user: rhun asks once per extension and project."""
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            out = self.command('print-dialog')
+            if 'dialog=Let Jupyter run programs' in out:
+                self.assertIn('.json', out)  # the command, its middle cut short
+                self.command('dialog yes')
+                return
+            self.command('wait 100')
+        self.fail('no question before the kernel started')
+
     def state_of(self, cell, want, timeout=60):
         return self.wait_for(lambda o: field(o, cell, 'state') == want, timeout)
 
@@ -145,6 +158,7 @@ class RealKernel(unittest.TestCase):
         self.assertEqual(field(out, 1, 'lang'), 'Python')
 
         self.command('nb-run 1')
+        self.approve()
         out = self.state_of(1, 'done')
         self.assertEqual(field(out, 1, 'count'), '1')
         self.assertIn('kernel=Python 3.', out)
@@ -158,9 +172,9 @@ class RealKernel(unittest.TestCase):
 
         self.command('nb-run 2')
         self.state_of(2, 'done', 90)
-        o = self.command('print-nb-output 2 0')
-        self.assertIn('kind=display', o)
-        self.assertIn('items=png', o)
+        # (a first run may say on stderr that matplotlib builds its font cache)
+        o = self.command('print-nb-output 2 0') + self.command('print-nb-output 2 1')
+        self.assertIn('kind=display id=- items=png', o)
 
         self.command('nb-run 3')
         self.state_of(3, 'failed')
@@ -197,7 +211,7 @@ class RealKernel(unittest.TestCase):
             'c = nb.cells\n'
             'assert c[1].execution_count == 1 and c[1].outputs[0].text == "hello\\n", c[1]\n'
             'assert c[1].outputs[1].data["text/plain"] == "42"\n'
-            'assert "image/png" in c[2].outputs[0].data\n'
+            'assert any("image/png" in o.get("data", {}) for o in c[2].outputs)\n'
             'assert c[3].outputs[0].ename == "ZeroDivisionError"\n'
             'assert c[5].outputs[0].data["text/plain"] == "\'two\'"\n'
             'assert nb.metadata.language_info.name == "python"\n'
