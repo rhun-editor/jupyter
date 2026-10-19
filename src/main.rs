@@ -71,7 +71,10 @@ impl Launcher for ExecLauncher {
                 log: self.state.join(format!("kernel-{exec}.log")),
                 exits: self.exits.clone(),
             })),
-            Err(e) if e.code == "unknown" => LocalLauncher.launch(nb, argv, cwd, env, log),
+            // an older rhun, or a remote window (the extension runs on the host there)
+            Err(e) if e.code == "unknown" || e.text.contains("remote window") => {
+                LocalLauncher.launch(nb, argv, cwd, env, log)
+            }
             Err(e) if e.code == "needs" => Err(format!(
                 "this extension may not start {} as a kernel ([needs] kernels in its manifest)",
                 argv[0]
