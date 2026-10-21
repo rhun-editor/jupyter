@@ -2,8 +2,8 @@
 """The jupyter extension in rhun with a real kernel: rhun runs headless with its control socket,
 the extension from this repository, and a project whose .venv has ipykernel, matplotlib and
 nbformat. Opens a notebook, runs cells (a stream and a result, a matplotlib figure, an exception,
-an interrupt, an updated display) in a kernel rhun starts as the user after asking (nb-exec),
-completion in a cell from the kernel,
+an interrupt, an updated display, HTML and JSON displays) in a kernel rhun starts as the user
+after asking (nb-exec), completion in a cell from the kernel,
 saves, validates the file with nbformat, restarts the kernel;
 and opens a file nbformat wrote, saving it back byte for byte.
 
@@ -45,6 +45,9 @@ NOTEBOOK = {
         code('import time\nprint("sleeping", flush=True)\ntime.sleep(60)'),
         code('from IPython.display import display\nh = display("one", display_id=True)\nh.update("two")'),
         code('import os\nos.pa'),
+        code('from IPython.display import HTML, JSON, display\n'
+             'display(HTML("<p>an <b>HTML</b> output</p><table><tr><th>k</th></tr><tr><td>1</td></tr></table>"))\n'
+             'display(JSON({"k": [1, 2]}))'),
     ],
     'metadata': {'kernelspec': {'display_name': 'Python 3 (ipykernel)', 'language': 'python', 'name': 'python3'}},
     'nbformat': 4, 'nbformat_minor': 5,
@@ -236,6 +239,16 @@ class RealKernel(unittest.TestCase):
         self.assertIn('pardir', o)
         self.command('key Escape')
         self.command('key Escape')
+
+        # HTML and JSON displays: a rich document (a Markdown table), then text to read
+        self.command('nb-run 7')
+        self.state_of(7, 'done')
+        o = self.command('print-nb-output 7 0')
+        self.assertIn('items=rich,text,ansi', o)
+        self.assertIn('an HTML output', o)
+        o = self.command('print-nb-output 7 1')
+        self.assertIn('items=text,ansi', o)
+        self.assertIn('"k": [', o)
 
         # a restart: a new kernel counts from 1 again
         self.command('cmd notebook.restart')

@@ -1,6 +1,7 @@
 //! rhun's jupyter extension: opens and saves .ipynb notebooks and runs their cells in Jupyter
 //! kernels (ipykernel in the project's Python environment, or an installed kernelspec).
 
+mod html;
 mod ipynb;
 mod kernel;
 mod zmtp;

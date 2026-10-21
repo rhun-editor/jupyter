@@ -64,8 +64,10 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The items rhun can show for a MIME bundle, best first: images, then HTML and Markdown (kept
-/// for rich rendering), then the plain text.
+/// The items rhun can show for a MIME bundle, best first: images; HTML (as Markdown) and Markdown
+/// as rich documents; the plain text unless it is only a repr like `<IPython.core.display.HTML
+/// object>`; then readable stand-ins for what rhun cannot draw (HTML as text, Markdown's source,
+/// indented JSON, LaTeX's source); the repr last.
 pub fn items_of(data: &Map<String, Value>, meta: Option<&Value>) -> Vec<Item> {
     let mut items = Vec::new();
     for (mime, kind) in [("image/png", "png"), ("image/jpeg", "jpeg"), ("image/gif", "gif")] {
@@ -78,21 +80,61 @@ pub fn items_of(data: &Map<String, Value>, meta: Option<&Value>) -> Vec<Item> {
             }
         }
     }
-    if let Some(v) = data.get("text/html") {
-        items.push(Item::new("html", text_of(v).as_bytes()));
+    let html = data.get("text/html").map(text_of);
+    let markdown = data.get("text/markdown").map(text_of);
+    if let Some(h) = &html {
+        let md = crate::html::to_markdown(h);
+        if !md.is_empty() {
+            items.push(rich(&md));
+        }
     }
-    if let Some(v) = data.get("text/markdown") {
-        items.push(Item::new("markdown", text_of(v).as_bytes()));
+    if let Some(m) = &markdown {
+        items.push(rich(m));
     }
-    if let Some(v) = data.get("text/plain") {
-        items.push(Item::ansi(&text_of(v)));
+    let plain = data.get("text/plain").map(text_of);
+    let repr = plain.as_deref().is_none_or(is_repr);
+    if let (Some(p), false) = (&plain, repr) {
+        items.push(Item::ansi(p));
+    }
+    if let Some(h) = &html {
+        let t = crate::html::to_text(h);
+        if !t.is_empty() {
+            items.push(Item::text(&t));
+        }
+    }
+    if let Some(m) = &markdown {
+        items.push(Item::text(m));
+    }
+    if let Some(v) = data.get("application/json") {
+        let mut t = serde_json::to_string_pretty(v).unwrap_or_default();
+        t.push('\n');
+        items.push(Item::text(&t));
+    }
+    if let Some(v) = data.get("text/latex") {
+        items.push(Item::text(&text_of(v)));
+    }
+    if let (Some(p), true) = (&plain, repr) {
+        items.push(Item::ansi(p));
     }
     if items.is_empty() {
-        // only kinds rhun cannot show (widgets, JSON): name them
+        // only kinds rhun cannot show (widgets, SVG): name them
         let kinds: Vec<&str> = data.keys().map(|k| k.as_str()).collect();
         items.push(Item::text(&format!("[{}]", kinds.join(", "))));
     }
     items
+}
+
+/// A rich-document body (the views design's patch body with one `doc` op) holding Markdown.
+fn rich(markdown: &str) -> Item {
+    let mut body = format!("1\ndoc {}\n", markdown.len()).into_bytes();
+    body.extend_from_slice(markdown.as_bytes());
+    Item::new("rich", &body)
+}
+
+/// A repr that says nothing (`<IPython.core.display.HTML object>`, or nothing at all).
+fn is_repr(s: &str) -> bool {
+    let t = s.trim();
+    t.is_empty() || (t.starts_with('<') && t.ends_with('>') && !t.contains('\n'))
 }
 
 /// An nbformat output as rhun's output: KEEP holds its JSON (a stream's is made again from its
@@ -400,5 +442,31 @@ mod tests {
         assert!(out.contains("\"source\": [\n    \"x = 1\\n\",\n    \"y = 2\"\n   ]"), "{out}");
         assert!(read(b"{\"nbformat\": 3}").is_err());
         assert!(read(b"not json").is_err());
+    }
+
+    fn kinds(v: Value) -> Vec<(String, String)> {
+        items_of(v.as_object().unwrap(), None)
+            .into_iter()
+            .map(|i| (i.kind, String::from_utf8(i.data).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn rich_items_and_readable_stand_ins() {
+        // a DataFrame: its table as a rich document, then pandas' own text
+        let k = kinds(json!({"text/html": "<table><tr><th>a</th></tr><tr><td>1</td></tr></table>", "text/plain": "   a\n0  1"}));
+        assert_eq!(k[0], ("rich".into(), "1\ndoc 20\n| a |\n| --- |\n| 1 |\n".into()));
+        assert_eq!(k[1], ("ansi".into(), "   a\n0  1".into()));
+        // HTML(...) and JSON(...): their text before the repr that says nothing
+        let k = kinds(json!({"text/html": "<b>hi</b> there", "text/plain": "<IPython.core.display.HTML object>"}));
+        assert_eq!(k.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["rich", "text", "ansi"]);
+        assert_eq!(k[1].1, "hi there\n");
+        let k = kinds(json!({"application/json": {"a": [1, 2]}, "text/plain": "<IPython.core.display.JSON object>"}));
+        assert_eq!(k[0], ("text".into(), "{\n  \"a\": [\n    1,\n    2\n  ]\n}\n".into()));
+        let k = kinds(json!({"text/markdown": "# T", "text/plain": "<IPython.core.display.Markdown object>"}));
+        assert_eq!(k.iter().map(|(k, d)| (k.as_str(), d.as_str())).collect::<Vec<_>>(),
+                   [("rich", "1\ndoc 3\n# T"), ("text", "# T"), ("ansi", "<IPython.core.display.Markdown object>")]);
+        assert_eq!(kinds(json!({"application/vnd.jupyter.widget-view+json": {}})),
+                   [("text".to_string(), "[application/vnd.jupyter.widget-view+json]".to_string())]);
     }
 }
