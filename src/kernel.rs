@@ -365,6 +365,8 @@ struct Pending {
 struct Shared {
     runs: HashMap<String, Pending>,
     info: Option<Value>,
+    /// complete_reply contents by the request's msg_id
+    replies: HashMap<String, Value>,
     iopub_alive: bool,
     kstate: Option<KernelState>,
 }
@@ -719,6 +721,18 @@ impl Kernel {
         Ok(())
     }
 
+    /// The kernel's completions for `code` with the cursor at `cursor` (in characters):
+    /// complete_reply's content, or None when it does not answer within 2 seconds.
+    pub fn complete(&self, code: &str, cursor: usize) -> Option<Value> {
+        let id = self.send(&self.shell, "complete_request", json!({ "code": code, "cursor_pos": cursor })).ok()?;
+        let sh = self.shared.lock().unwrap();
+        let (mut sh, _) = self
+            .cv
+            .wait_timeout_while(sh, Duration::from_secs(2), |s| !s.replies.contains_key(&id))
+            .unwrap();
+        sh.replies.remove(&id)
+    }
+
     pub fn busy(&self) -> bool {
         !self.shared.lock().unwrap().runs.is_empty()
     }
@@ -836,6 +850,11 @@ impl Kernel {
             "kernel_info_reply" => {
                 let mut sh = self.shared.lock().unwrap();
                 sh.info = Some(c.clone());
+                self.cv.notify_all();
+            }
+            "complete_reply" => {
+                let mut sh = self.shared.lock().unwrap();
+                sh.replies.insert(pid.to_string(), c.clone());
                 self.cv.notify_all();
             }
             "execute_reply" => {

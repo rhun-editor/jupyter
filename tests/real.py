@@ -3,6 +3,7 @@
 the extension from this repository, and a project whose .venv has ipykernel, matplotlib and
 nbformat. Opens a notebook, runs cells (a stream and a result, a matplotlib figure, an exception,
 an interrupt, an updated display) in a kernel rhun starts as the user after asking (nb-exec),
+completion in a cell from the kernel,
 saves, validates the file with nbformat, restarts the kernel;
 and opens a file nbformat wrote, saving it back byte for byte.
 
@@ -43,6 +44,7 @@ NOTEBOOK = {
         code('1 / 0'),
         code('import time\nprint("sleeping", flush=True)\ntime.sleep(60)'),
         code('from IPython.display import display\nh = display("one", display_id=True)\nh.update("two")'),
+        code('import os\nos.pa'),
     ],
     'metadata': {'kernelspec': {'display_name': 'Python 3 (ipykernel)', 'language': 'python', 'name': 'python3'}},
     'nbformat': 4, 'nbformat_minor': 5,
@@ -217,6 +219,23 @@ class RealKernel(unittest.TestCase):
             'assert nb.metadata.language_info.name == "python"\n'
             'print("valid")\n'), str(nb)], capture_output=True, text=True)
         self.assertEqual(check.stdout.strip(), 'valid', check.stderr)
+
+        # completion in a cell comes from its kernel (the cell is a document to the extension)
+        self.command('nb-run 6')
+        self.state_of(6, 'failed')
+        self.command('nb-select 6')
+        self.command('key Return')
+        self.command('key ctrl+End')
+        self.command('cmd complete')
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            o = self.command('print-complete')
+            if 'pardir' in o:
+                break
+            self.command('wait 200')
+        self.assertIn('pardir', o)
+        self.command('key Escape')
+        self.command('key Escape')
 
         # a restart: a new kernel counts from 1 again
         self.command('cmd notebook.restart')

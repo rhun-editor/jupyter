@@ -10,7 +10,7 @@ use rhun_ext::notebook::{
     CellId, Command, ExecId, ExecSignal, KernelState, NbId, NbOpen, NbRun, NbSave, Notebook, Output, OutputOp, RunId,
     RunState,
 };
-use rhun_ext::{Ext, Feature, Handler};
+use rhun_ext::{CompleteRequest, CompletionItem, CompletionList, Doc, Ext, Feature, Handler, Kind, Pos, Range};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -148,6 +148,8 @@ struct Ctx {
 
 struct App {
     nbs: Nbs,
+    /// the notebook each cell document it heard of belongs to (feature notebooks, `0 cell`)
+    cells: HashMap<Doc, NbId>,
     project: Option<PathBuf>,
     state: PathBuf,
     sink: Option<Arc<dyn Sink>>,
@@ -414,6 +416,48 @@ impl Handler for App {
         self.exits.lock().unwrap().insert(exec, code);
     }
 
+    fn nb_cell(&mut self, _ext: &Ext, doc: Doc, nb: NbId, _cell: CellId, _index: usize) {
+        self.cells.insert(doc, nb);
+    }
+
+    fn nb_cells(&mut self, _ext: &Ext, nb: NbId, docs: &[Doc]) {
+        self.cells.retain(|_, n| *n != nb);
+        for d in docs {
+            self.cells.insert(*d, nb);
+        }
+    }
+
+    /// Completion in a cell, from its notebook's kernel (complete_request); none elsewhere.
+    fn complete(&mut self, ext: &Ext, req: &CompleteRequest) -> CompletionList {
+        let Some(nb) = self.cells.get(&req.doc).copied() else { return CompletionList::default() };
+        let kernel = match self.nbs.lock().unwrap().get(&nb).map(|n| &n.kernel) {
+            Some(Ks::Ready(k)) => k.clone(),
+            _ => return CompletionList::default(),
+        };
+        let Ok((text, _)) = ext.text(req.doc) else { return CompletionList::default() };
+        let text = String::from_utf8_lossy(&text).into_owned();
+        let Some(at) = byte_at(&text, req.at) else { return CompletionList::default() };
+        let cursor = text[..at].chars().count();
+        let Some(reply) = kernel.complete(&text, cursor) else { return CompletionList::default() };
+        let chars = |key: &str| reply.get(key).and_then(|v| v.as_u64()).map(|n| n as usize);
+        let (Some(start), Some(end)) = (chars("cursor_start"), chars("cursor_end")) else {
+            return CompletionList::default();
+        };
+        let range = Range::new(pos_of(&text, char_byte(&text, start)), pos_of(&text, char_byte(&text, end)));
+        let items = reply
+            .get("matches")
+            .and_then(|m| m.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.as_str())
+                    .take(500)
+                    .map(|m| CompletionItem::new(range, Kind::Text, m))
+                    .collect()
+            })
+            .unwrap_or_default();
+        CompletionList::new(items)
+    }
+
     fn nb_closed(&mut self, _ext: &Ext, nb: NbId) {
         let n = self.nbs.lock().unwrap().remove(&nb);
         if let Some(Nb { kernel: Ks::Ready(k), .. }) = n {
@@ -436,6 +480,32 @@ impl Handler for App {
     }
 }
 
+/// The byte offset of a position (1-based line, 1-based byte column).
+fn byte_at(text: &str, at: Pos) -> Option<usize> {
+    let mut off = 0;
+    for (i, line) in text.split('\n').enumerate() {
+        if i + 1 == at.line as usize {
+            let col = at.col as usize - 1;
+            return (col <= line.len()).then_some(off + col);
+        }
+        off += line.len() + 1;
+    }
+    None
+}
+
+/// The byte offset of the n-th character.
+fn char_byte(text: &str, n: usize) -> usize {
+    text.char_indices().nth(n).map(|(b, _)| b).unwrap_or(text.len())
+}
+
+/// The position of a byte offset.
+fn pos_of(text: &str, off: usize) -> Pos {
+    let before = &text[..off.min(text.len())];
+    let line = before.matches('\n').count() as u32 + 1;
+    let col = (before.len() - before.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32 + 1;
+    Pos::new(line, col)
+}
+
 fn main() {
     let state = std::env::var_os("RHUN_STATE")
         .or_else(|| std::env::var_os("HOME"))
@@ -443,13 +513,14 @@ fn main() {
         .unwrap_or_else(std::env::temp_dir);
     let app = App {
         nbs: Arc::new(Mutex::new(HashMap::new())),
+        cells: HashMap::new(),
         project: None,
         state,
         sink: None,
         launcher: None,
         exits: Arc::new(Mutex::new(HashMap::new())),
     };
-    if let Err(e) = rhun_ext::run(&[Feature::Notebooks], app) {
+    if let Err(e) = rhun_ext::run(&[Feature::Notebooks, Feature::Complete], app) {
         eprintln!("jupyter: {e}");
     }
 }
