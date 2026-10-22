@@ -104,7 +104,8 @@ dependencies = [
 
 [[package]]
 name = "rhun-ext"
-version = "1.4.0"
+version = "1.4.1"
+source = "git+https://github.com/rhun-editor/extension-protocol?tag=rust-v1.4.1#02d671bb8382f54d55a84a68b4474199c6bea544"
 
 [[package]]
 name = "serde"

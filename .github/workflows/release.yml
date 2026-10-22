@@ -1,0 +1,91 @@
+# A tag vX.Y.Z (equal to version in extension.ini) builds the extension on Linux, macOS and
+# Windows and publishes what rhun's Install from GitHub takes (https://rhun.app/extensions/v1/,
+# section 11): NAME-TARGET.tar.gz, the extension folder's contents at its top level, and
+# sha256sums.txt covering them.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { target: linux-x86_64, os: ubuntu-latest, rust: x86_64-unknown-linux-musl }
+          - { target: macos-arm64, os: macos-latest, rust: aarch64-apple-darwin }
+          - { target: windows-x64, os: windows-latest, rust: x86_64-pc-windows-msvc }
+          # no WebAssembly module: the extension talks to its kernels over TCP, and WASI preview 1
+          # has no sockets
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.rust }}
+      - name: Build
+        shell: bash
+        env:
+          # a static C runtime on Windows: the program runs without the Visual C++ redistributable
+          RUSTFLAGS: ${{ matrix.target == 'windows-x64' && '-C target-feature=+crt-static' || '' }}
+        run: |
+          set -e
+          cargo test --locked
+          cargo build --release --locked --target ${{ matrix.rust }}
+          name=$(sed -n 's/^name *= *//p' extension.ini | head -1)
+          exe=""; if [ "${{ matrix.target }}" = windows-x64 ]; then exe=.exe; fi
+          mkdir -p out
+          if [ "${{ matrix.target }}" = wasm32-wasip1 ]; then
+            cp "target/wasm32-wasip1/release/$name.wasm" out/module.wasm
+          else
+            cp "target/${{ matrix.rust }}/release/$name$exe" "out/$name-${{ matrix.target }}$exe"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: out
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is the manifest's version
+        run: test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/^version *= *//p' extension.ini | head -1)"
+      # outside the checkout, which tests/layout.sh copies from
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/bins
+      - name: Pack
+        run: |
+          set -e
+          name=$(sed -n 's/^name *= *//p' extension.ini | head -1)
+          bins=$RUNNER_TEMP/bins
+          mkdir -p dist
+          # native binaries for the targets the manifest names; the module (run.wasm32-wasip1),
+          # when it names one, in every archive
+          module=$(sed -n 's/^run\.wasm32-wasip1 *= *//p' extension.ini | head -1)
+          for t in linux-x86_64 macos-arm64 windows-x64; do
+            stage=$(mktemp -d)
+            # the extension's files (tests/layout.sh: all but the source, tests and build files),
+            # then the program
+            sh tests/layout.sh "$stage"
+            mkdir -p "$stage/bin"
+            if grep -q "^run\.$t *=" extension.ini; then
+              cp "$bins/bin-$t/"* "$stage/bin/"
+              chmod +x "$stage/bin/"*
+            fi
+            if [ -n "$module" ]; then mkdir -p "$stage/$(dirname "$module")"; cp "$bins/bin-wasm32-wasip1/module.wasm" "$stage/$module"; fi
+            tar -czf "dist/$name-$t.tar.gz" -C "$stage" .
+          done
+          (cd dist && sha256sum *.tar.gz > sha256sums.txt)
+          cat dist/sha256sums.txt
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" \
+            --notes "Install it in rhun: the extensions button in the title bar, then Install from GitHub, then ${GITHUB_REPOSITORY}."

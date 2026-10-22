@@ -7,7 +7,8 @@ publish = false
 description = "Jupyter notebooks for the rhun editor: reads and writes .ipynb and runs cells in Jupyter kernels."
 
 [dependencies]
-rhun-ext = { path = "../extension-protocol/rust/rhun-ext" }
+# rhun-ext 1.4.1: protocol 1.1 (rhun 0.18)
+rhun-ext = { git = "https://github.com/rhun-editor/extension-protocol", tag = "rust-v1.4.1" }
 serde = "1"
 serde_json = "1"
 sha2 = "0.10"
