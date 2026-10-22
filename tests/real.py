@@ -245,7 +245,9 @@ class RealKernel(unittest.TestCase):
         self.state_of(7, 'done')
         o = self.command('print-nb-output 7 0')
         self.assertIn('items=rich,text,ansi', o)
-        self.assertIn('an HTML output', o)
+        # rhun prints the rich document it shows: its words, and the table's rows
+        for want in ('text=an', 'text=HTML', 'text=output', 'type=row'):
+            self.assertIn(want, o)
         o = self.command('print-nb-output 7 1')
         self.assertIn('items=text,ansi', o)
         self.assertIn('"k": [', o)
