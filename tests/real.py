@@ -230,7 +230,8 @@ class RealKernel(unittest.TestCase):
         self.command('key Return')
         self.command('key ctrl+End')
         self.command('cmd complete')
-        deadline = time.monotonic() + 10
+        # the kernel's first completion loads jedi: the extension waits up to 8 s for it
+        deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             o = self.command('print-complete')
             if 'pardir' in o:

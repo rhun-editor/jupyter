@@ -858,8 +858,14 @@ impl Kernel {
     }
 
     /// The kernel's completions for `code` with the cursor at `cursor` (in characters):
-    /// complete_reply's content, or None when it does not answer within 2 seconds.
+    /// complete_reply's content, or None when it does not answer in time. An idle kernel gets 8
+    /// seconds: its first completion loads jedi and parses the module's stubs, over a second on a
+    /// fast machine and more than 2 on a CI runner. A busy one answers only after the running cell
+    /// (the shell channel is one queue), so it gets 2.
     pub fn complete(&self, code: &str, cursor: usize) -> Option<Value> {
+        let wait = Duration::from_secs(if self.busy() { 2 } else { 8 });
+        // a reply that came too late for its request is no use to anyone
+        self.shared.lock().unwrap().replies.clear();
         let id = self
             .send(
                 &self.shell,
@@ -870,7 +876,7 @@ impl Kernel {
         let sh = self.shared.lock().unwrap();
         let (mut sh, _) = self
             .cv
-            .wait_timeout_while(sh, Duration::from_secs(2), |s| !s.replies.contains_key(&id))
+            .wait_timeout_while(sh, wait, |s| !s.replies.contains_key(&id))
             .unwrap();
         sh.replies.remove(&id)
     }
