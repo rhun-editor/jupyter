@@ -75,12 +75,21 @@ fn random_hex(bytes: usize) -> String {
 
 fn uuid() -> String {
     let h = random_hex(16);
-    format!("{}-{}-4{}-a{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
+    format!(
+        "{}-{}-4{}-a{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[13..16],
+        &h[17..20],
+        &h[20..32]
+    )
 }
 
 /// Now as ISO 8601 in UTC, as Jupyter's headers have it.
 fn iso_now() -> String {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = d.as_secs() as i64;
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
     // civil from days (Howard Hinnant)
@@ -117,7 +126,11 @@ pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> String {
     let mut outer = Sha256::new();
     outer.update(k.map(|b| b ^ 0x5c));
     outer.update(inner.finalize());
-    outer.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    outer
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 // ---------------------------------------------------------------- finding kernels
@@ -126,14 +139,22 @@ fn venv_python(dir: &Path) -> Option<PathBuf> {
     if !dir.join("pyvenv.cfg").is_file() && !dir.join("conda-meta").is_dir() {
         return None;
     }
-    let p = if cfg!(windows) { dir.join("Scripts").join("python.exe") } else { dir.join("bin").join("python") };
+    let p = if cfg!(windows) {
+        dir.join("Scripts").join("python.exe")
+    } else {
+        dir.join("bin").join("python")
+    };
     p.exists().then_some(p)
 }
 
 fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for d in std::env::split_paths(&path) {
-        let p = d.join(if cfg!(windows) { format!("{name}.exe") } else { name.to_string() });
+        let p = d.join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        });
         if p.is_file() {
             return Some(p);
         }
@@ -162,7 +183,9 @@ fn probe(python: &Path) -> Option<Probe> {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() < Duration::from_secs(10) => thread::sleep(Duration::from_millis(10)),
+            Ok(None) if start.elapsed() < Duration::from_secs(10) => {
+                thread::sleep(Duration::from_millis(10))
+            }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -228,7 +251,11 @@ fn spec_dirs(prefixes: &[String]) -> Vec<PathBuf> {
         dirs.push(Path::new(p).join("share/jupyter/kernels"));
     }
     if !cfg!(windows) {
-        for d in ["/usr/local/share/jupyter/kernels", "/usr/share/jupyter/kernels", "/opt/homebrew/share/jupyter/kernels"] {
+        for d in [
+            "/usr/local/share/jupyter/kernels",
+            "/usr/share/jupyter/kernels",
+            "/opt/homebrew/share/jupyter/kernels",
+        ] {
             dirs.push(PathBuf::from(d));
         }
     }
@@ -291,7 +318,11 @@ pub fn discover(dir: &Path, project: Option<&Path>) -> Vec<Candidate> {
             problem: if pr.ipykernel {
                 String::new()
             } else {
-                format!("ipykernel is not installed for {}: run {} -m pip install ipykernel", py.display(), py.display())
+                format!(
+                    "ipykernel is not installed for {}: run {} -m pip install ipykernel",
+                    py.display(),
+                    py.display()
+                )
             },
             signal_interrupt: true,
             env: Vec::new(),
@@ -302,17 +333,28 @@ pub fn discover(dir: &Path, project: Option<&Path>) -> Vec<Candidate> {
         let mut names: Vec<_> = rd.flatten().map(|e| e.path()).collect();
         names.sort();
         for kdir in names {
-            let Ok(text) = fs::read_to_string(kdir.join("kernel.json")) else { continue };
-            let Ok(spec) = serde_json::from_str::<Value>(&text) else { continue };
+            let Ok(text) = fs::read_to_string(kdir.join("kernel.json")) else {
+                continue;
+            };
+            let Ok(spec) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
             let argv: Vec<String> = spec
                 .get("argv")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             if argv.is_empty() {
                 continue;
             }
-            let name = kdir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = kdir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             // python's own spec ("python" -m ipykernel_launcher) is the environment it is in
             if argv[0] == "python" || argv[0] == "python3" {
                 continue;
@@ -320,20 +362,33 @@ pub fn discover(dir: &Path, project: Option<&Path>) -> Vec<Candidate> {
             if out.iter().any(|c: &Candidate| c.argv == argv) {
                 continue;
             }
-            let display = spec.get("display_name").and_then(|v| v.as_str()).unwrap_or(&name).to_string();
+            let display = spec
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&name)
+                .to_string();
             let env = spec
                 .get("env")
                 .and_then(|v| v.as_object())
-                .map(|m| m.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
                 .unwrap_or_default();
             out.push(Candidate {
                 label: display.clone(),
                 argv,
                 spec_name: name,
                 display_name: display,
-                language: spec.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                language: spec
+                    .get("language")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 problem: String::new(),
-                signal_interrupt: spec.get("interrupt_mode").and_then(|v| v.as_str()) != Some("message"),
+                signal_interrupt: spec.get("interrupt_mode").and_then(|v| v.as_str())
+                    != Some("message"),
                 env,
             });
         }
@@ -345,11 +400,18 @@ pub fn discover(dir: &Path, project: Option<&Path>) -> Vec<Candidate> {
 /// that is not plain Python), else the first environment with ipykernel.
 pub fn default_choice(cands: &[Candidate], spec_name: Option<&str>) -> Option<Candidate> {
     if let Some(name) = spec_name {
-        if let Some(c) = cands.iter().find(|c| c.spec_name == name && c.spec_name != "python3" && c.problem.is_empty()) {
+        if let Some(c) = cands
+            .iter()
+            .find(|c| c.spec_name == name && c.spec_name != "python3" && c.problem.is_empty())
+        {
             return Some(c.clone());
         }
     }
-    cands.iter().find(|c| c.problem.is_empty()).or_else(|| cands.first()).cloned()
+    cands
+        .iter()
+        .find(|c| c.problem.is_empty())
+        .or_else(|| cands.first())
+        .cloned()
 }
 
 // ---------------------------------------------------------------- a running kernel
@@ -383,7 +445,14 @@ pub trait Proc: Send + Sync {
 
 /// Starts kernel processes.
 pub trait Launcher: Send + Sync {
-    fn launch(&self, nb: NbId, argv: &[String], cwd: &Path, env: &[(String, String)], log: &Path) -> Result<Box<dyn Proc>, String>;
+    fn launch(
+        &self,
+        nb: NbId,
+        argv: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<Box<dyn Proc>, String>;
 }
 
 /// The extension starts the kernel itself, inside its own sandbox (tests, and a rhun without
@@ -396,7 +465,14 @@ struct LocalProc {
 }
 
 impl Launcher for LocalLauncher {
-    fn launch(&self, _nb: NbId, argv: &[String], cwd: &Path, env: &[(String, String)], log: &Path) -> Result<Box<dyn Proc>, String> {
+    fn launch(
+        &self,
+        _nb: NbId,
+        argv: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<Box<dyn Proc>, String> {
         let logf = fs::File::create(log).map_err(|e| e.to_string())?;
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..])
@@ -405,8 +481,13 @@ impl Launcher for LocalLauncher {
             .stdout(logf.try_clone().map_err(|e| e.to_string())?)
             .stderr(logf)
             .envs(env.iter().map(|(k, v)| (k, v)));
-        let child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", argv[0]))?;
-        Ok(Box::new(LocalProc { child: Mutex::new(child), log: log.to_path_buf() }))
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("cannot start {}: {e}", argv[0]))?;
+        Ok(Box::new(LocalProc {
+            child: Mutex::new(child),
+            log: log.to_path_buf(),
+        }))
     }
 }
 
@@ -466,8 +547,12 @@ pub struct Kernel {
 }
 
 fn free_ports(n: usize) -> std::io::Result<Vec<u16>> {
-    let ls: Vec<TcpListener> = (0..n).map(|_| TcpListener::bind("127.0.0.1:0")).collect::<Result<_, _>>()?;
-    ls.iter().map(|l| l.local_addr().map(|a| a.port())).collect()
+    let ls: Vec<TcpListener> = (0..n)
+        .map(|_| TcpListener::bind("127.0.0.1:0"))
+        .collect::<Result<_, _>>()?;
+    ls.iter()
+        .map(|l| l.local_addr().map(|a| a.port()))
+        .collect()
 }
 
 fn tail(path: &Path, lines: usize) -> String {
@@ -498,8 +583,17 @@ fn split_bundle(data: &Value) -> Value {
     let mut m = Map::new();
     if let Some(obj) = data.as_object() {
         for (k, v) in obj {
-            let split = (k.starts_with("text/") || k == "application/javascript" || k == "image/svg+xml") && v.is_string();
-            m.insert(k.clone(), if split { ipynb::lines_of(v.as_str().unwrap()) } else { v.clone() });
+            let split =
+                (k.starts_with("text/") || k == "application/javascript" || k == "image/svg+xml")
+                    && v.is_string();
+            m.insert(
+                k.clone(),
+                if split {
+                    ipynb::lines_of(v.as_str().unwrap())
+                } else {
+                    v.clone()
+                },
+            );
         }
     }
     Value::Object(m)
@@ -510,7 +604,11 @@ fn rich_output(ty: &str, c: &Value) -> Output {
     let empty = Map::new();
     let data = c.get("data").and_then(|v| v.as_object()).unwrap_or(&empty);
     let md = c.get("metadata").cloned().unwrap_or(json!({}));
-    let kind = if ty == "execute_result" { OutputKind::Result } else { OutputKind::Display };
+    let kind = if ty == "execute_result" {
+        OutputKind::Result
+    } else {
+        OutputKind::Display
+    };
     let mut keep = json!({
         "data": split_bundle(&Value::Object(data.clone())),
         "metadata": md,
@@ -533,7 +631,11 @@ fn error_output(c: &Value) -> Output {
     let tb: Vec<String> = c
         .get("traceback")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     let keep = json!({
         "ename": c.get("ename").cloned().unwrap_or(json!("")),
@@ -574,11 +676,19 @@ impl Kernel {
             "control_port": ports[3], "hb_port": ports[4], "ip": "127.0.0.1", "key": key,
             "transport": "tcp", "signature_scheme": "hmac-sha256", "kernel_name": cand.spec_name,
         });
-        fs::write(&conn_file, serde_json::to_vec_pretty(&conn).unwrap()).map_err(|e| format!("cannot write {}: {e}", conn_file.display()))?;
-        let argv: Vec<String> = cand.argv.iter().map(|a| a.replace("{connection_file}", &conn_file.display().to_string())).collect();
+        fs::write(&conn_file, serde_json::to_vec_pretty(&conn).unwrap())
+            .map_err(|e| format!("cannot write {}: {e}", conn_file.display()))?;
+        let argv: Vec<String> = cand
+            .argv
+            .iter()
+            .map(|a| a.replace("{connection_file}", &conn_file.display().to_string()))
+            .collect();
         let mut env = vec![
             ("JPY_PARENT_PID".to_string(), parent_pid().to_string()),
-            ("PYDEVD_DISABLE_FILE_VALIDATION".to_string(), "1".to_string()),
+            (
+                "PYDEVD_DISABLE_FILE_VALIDATION".to_string(),
+                "1".to_string(),
+            ),
         ];
         env.extend(cand.env.iter().cloned());
         let proc_ = match launcher.launch(nb, &argv, cwd, &env, &log) {
@@ -596,10 +706,15 @@ impl Kernel {
                     Ok(s) => return Ok(s),
                     Err(e) => {
                         if proc_.exited() {
-                            return Err(format!("the kernel exited before it was ready:\n{}", tail(&log, 20)));
+                            return Err(format!(
+                                "the kernel exited before it was ready:\n{}",
+                                tail(&log, 20)
+                            ));
                         }
                         if Instant::now() > deadline {
-                            return Err(format!("the kernel did not open its ports within 60 seconds ({e})"));
+                            return Err(format!(
+                                "the kernel did not open its ports within 60 seconds ({e})"
+                            ));
                         }
                         thread::sleep(Duration::from_millis(100));
                     }
@@ -644,9 +759,10 @@ impl Kernel {
         loop {
             let _ = k.send(&k.shell, "kernel_info_request", json!({}));
             let sh = k.shared.lock().unwrap();
-            let (sh, _) = k
-                .cv
-                .wait_timeout_while(sh, Duration::from_millis(500), |s| !(s.info.is_some() && s.iopub_alive))
+            let (sh, _) =
+                k.cv.wait_timeout_while(sh, Duration::from_millis(500), |s| {
+                    !(s.info.is_some() && s.iopub_alive)
+                })
                 .unwrap();
             if sh.info.is_some() && sh.iopub_alive {
                 break;
@@ -654,7 +770,10 @@ impl Kernel {
             drop(sh);
             if k.exited() || Instant::now() > deadline {
                 let why = if k.exited() {
-                    format!("the kernel exited before it was ready:\n{}", tail(&k.proc_.log(), 20))
+                    format!(
+                        "the kernel exited before it was ready:\n{}",
+                        tail(&k.proc_.log(), 20)
+                    )
                 } else {
                     "the kernel did not answer within 60 seconds".to_string()
                 };
@@ -670,7 +789,13 @@ impl Kernel {
     }
 
     pub fn language_info(&self) -> Option<Value> {
-        self.shared.lock().unwrap().info.as_ref().and_then(|i| i.get("language_info")).cloned()
+        self.shared
+            .lock()
+            .unwrap()
+            .info
+            .as_ref()
+            .and_then(|i| i.get("language_info"))
+            .cloned()
     }
 
     fn send(&self, sock: &Mutex<Socket>, msg_type: &str, content: Value) -> Result<String, String> {
@@ -700,7 +825,15 @@ impl Kernel {
         // registered before sending, so no message for it can come first
         let mut sh = self.shared.lock().unwrap();
         let id = uuid();
-        sh.runs.insert(id.clone(), Pending { cell, run, reply: None, idle: false });
+        sh.runs.insert(
+            id.clone(),
+            Pending {
+                cell,
+                run,
+                reply: None,
+                idle: false,
+            },
+        );
         drop(sh);
         let header = json!({
             "date": iso_now(), "msg_id": id, "msg_type": "execute_request", "session": self.session,
@@ -709,11 +842,14 @@ impl Kernel {
         let h = serde_json::to_vec(&header).unwrap();
         let c = serde_json::to_vec(&content).unwrap();
         let sig = hmac_sha256(&self.key, &[&h, b"{}", b"{}", &c]);
-        let r = self
-            .shell
-            .lock()
-            .unwrap()
-            .send(&[b"<IDS|MSG>".to_vec(), sig.into_bytes(), h, b"{}".to_vec(), b"{}".to_vec(), c]);
+        let r = self.shell.lock().unwrap().send(&[
+            b"<IDS|MSG>".to_vec(),
+            sig.into_bytes(),
+            h,
+            b"{}".to_vec(),
+            b"{}".to_vec(),
+            c,
+        ]);
         if let Err(e) = r {
             self.shared.lock().unwrap().runs.remove(&id);
             return Err(e.to_string());
@@ -724,7 +860,13 @@ impl Kernel {
     /// The kernel's completions for `code` with the cursor at `cursor` (in characters):
     /// complete_reply's content, or None when it does not answer within 2 seconds.
     pub fn complete(&self, code: &str, cursor: usize) -> Option<Value> {
-        let id = self.send(&self.shell, "complete_request", json!({ "code": code, "cursor_pos": cursor })).ok()?;
+        let id = self
+            .send(
+                &self.shell,
+                "complete_request",
+                json!({ "code": code, "cursor_pos": cursor }),
+            )
+            .ok()?;
         let sh = self.shared.lock().unwrap();
         let (mut sh, _) = self
             .cv
@@ -754,7 +896,11 @@ impl Kernel {
     /// Asks the kernel to end, then makes sure it has (2 s later it is killed).
     pub fn shutdown(&self, restart: bool) {
         self.stopping.store(true, Ordering::SeqCst);
-        let _ = self.send(&self.control, "shutdown_request", json!({ "restart": restart }));
+        let _ = self.send(
+            &self.control,
+            "shutdown_request",
+            json!({ "restart": restart }),
+        );
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(2) && !self.proc_.exited() {
             thread::sleep(Duration::from_millis(20));
@@ -781,12 +927,22 @@ impl Kernel {
 
     fn reader(self: Arc<Self>, mut sock: Socket, chan: &'static str) {
         while let Ok(frames) = sock.recv() {
-            let Some(d) = frames.iter().position(|f| f == b"<IDS|MSG>") else { continue };
+            let Some(d) = frames.iter().position(|f| f == b"<IDS|MSG>") else {
+                continue;
+            };
             if frames.len() < d + 6 {
                 continue;
             }
             let sig = String::from_utf8_lossy(&frames[d + 1]);
-            let want = hmac_sha256(&self.key, &[&frames[d + 2], &frames[d + 3], &frames[d + 4], &frames[d + 5]]);
+            let want = hmac_sha256(
+                &self.key,
+                &[
+                    &frames[d + 2],
+                    &frames[d + 3],
+                    &frames[d + 4],
+                    &frames[d + 5],
+                ],
+            );
             if sig != want {
                 continue;
             }
@@ -797,8 +953,16 @@ impl Kernel {
             ) else {
                 continue;
             };
-            let ty = header.get("msg_type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let pid = parent.get("msg_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ty = header
+                .get("msg_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let pid = parent
+                .get("msg_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             match chan {
                 "iopub" => self.on_iopub(&ty, &pid, &content),
                 "shell" => self.on_shell(&ty, &pid, &content),
@@ -809,21 +973,40 @@ impl Kernel {
             // the kernel went away without being asked
             self.stopping.store(true, Ordering::SeqCst);
             let runs = self.take_runs();
-            let why = format!("The kernel died. Restart it to run cells.\n{}", tail(&self.proc_.log(), 10));
+            let why = format!(
+                "The kernel died. Restart it to run cells.\n{}",
+                tail(&self.proc_.log(), 10)
+            );
             for (i, (cell, run)) in runs.iter().enumerate() {
                 if i == 0 {
-                    self.sink.output(self.nb, *cell, *run, Op::Append, Some(&message_output(&why)));
+                    self.sink.output(
+                        self.nb,
+                        *cell,
+                        *run,
+                        Op::Append,
+                        Some(&message_output(&why)),
+                    );
                 }
-                self.sink.state(self.nb, *cell, *run, RunState::Failed, None);
+                self.sink
+                    .state(self.nb, *cell, *run, RunState::Failed, None);
             }
             self.shared.lock().unwrap().kstate = Some(KernelState::Dead);
-            self.sink.label(self.nb, KernelState::Dead, &format!("{} (dead)", self.cand.label));
+            self.sink.label(
+                self.nb,
+                KernelState::Dead,
+                &format!("{} (dead)", self.cand.label),
+            );
             self.proc_.kill();
         }
     }
 
     fn run_of(&self, pid: &str) -> Option<(CellId, RunId)> {
-        self.shared.lock().unwrap().runs.get(pid).map(|p| (p.cell, p.run))
+        self.shared
+            .lock()
+            .unwrap()
+            .runs
+            .get(pid)
+            .map(|p| (p.cell, p.run))
     }
 
     /// Ends a run once both its reply (shell) and its idle status (iopub) came: outputs come on
@@ -831,7 +1014,9 @@ impl Kernel {
     fn maybe_finish(&self, pid: &str) {
         let mut sh = self.shared.lock().unwrap();
         let Some(p) = sh.runs.get(pid) else { return };
-        let Some((status, count)) = p.reply.clone() else { return };
+        let Some((status, count)) = p.reply.clone() else {
+            return;
+        };
         if !p.idle && status != "aborted" {
             return;
         }
@@ -858,7 +1043,11 @@ impl Kernel {
                 self.cv.notify_all();
             }
             "execute_reply" => {
-                let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("error").to_string();
+                let status = c
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("error")
+                    .to_string();
                 let count = c.get("execution_count").and_then(|v| v.as_u64());
                 if let Some(p) = self.shared.lock().unwrap().runs.get_mut(pid) {
                     p.reply = Some((status, count));
@@ -878,7 +1067,10 @@ impl Kernel {
             }
         }
         if ty == "status" {
-            let st = c.get("execution_state").and_then(|v| v.as_str()).unwrap_or("");
+            let st = c
+                .get("execution_state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             match st {
                 "busy" => self.set_kstate(KernelState::Busy),
                 "idle" => {
@@ -895,7 +1087,9 @@ impl Kernel {
             }
             return;
         }
-        let Some((cell, run)) = self.run_of(pid) else { return };
+        let Some((cell, run)) = self.run_of(pid) else {
+            return;
+        };
         let nb = self.nb;
         match ty {
             "execute_input" => {
@@ -912,17 +1106,28 @@ impl Kernel {
                 self.sink.output(nb, cell, run, Op::Append, Some(&out));
             }
             "update_display_data" => {
-                if let Some(id) = c.get("transient").and_then(|t| t.get("display_id")).and_then(|v| v.as_str()).and_then(out_id) {
+                if let Some(id) = c
+                    .get("transient")
+                    .and_then(|t| t.get("display_id"))
+                    .and_then(|v| v.as_str())
+                    .and_then(out_id)
+                {
                     let out = rich_output("display_data", c);
-                    self.sink.output(nb, cell, run, Op::ReplaceId(id), Some(&out));
+                    self.sink
+                        .output(nb, cell, run, Op::ReplaceId(id), Some(&out));
                 }
             }
             "clear_output" => {
-                let op = if c.get("wait").and_then(|v| v.as_bool()) == Some(true) { Op::ClearWait } else { Op::Clear };
+                let op = if c.get("wait").and_then(|v| v.as_bool()) == Some(true) {
+                    Op::ClearWait
+                } else {
+                    Op::Clear
+                };
                 self.sink.output(nb, cell, run, op, None);
             }
             "error" => {
-                self.sink.output(nb, cell, run, Op::Append, Some(&error_output(c)));
+                self.sink
+                    .output(nb, cell, run, Op::Append, Some(&error_output(c)));
             }
             _ => {}
         }
@@ -942,7 +1147,10 @@ mod tests {
         );
         let long = [0xaau8; 131];
         assert_eq!(
-            hmac_sha256(&long, &[b"Test Using Larger Than Block-Size Key - Hash Key First"]),
+            hmac_sha256(
+                &long,
+                &[b"Test Using Larger Than Block-Size Key - Hash Key First"]
+            ),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
     }

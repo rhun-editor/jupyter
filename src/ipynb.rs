@@ -70,12 +70,24 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 /// indented JSON, LaTeX's source); the repr last.
 pub fn items_of(data: &Map<String, Value>, meta: Option<&Value>) -> Vec<Item> {
     let mut items = Vec::new();
-    for (mime, kind) in [("image/png", "png"), ("image/jpeg", "jpeg"), ("image/gif", "gif")] {
+    for (mime, kind) in [
+        ("image/png", "png"),
+        ("image/jpeg", "jpeg"),
+        ("image/gif", "gif"),
+    ] {
         if let Some(v) = data.get(mime) {
             if let Some(bytes) = b64_decode(&text_of(v)) {
                 let size = meta.and_then(|m| m.get(mime));
-                let w = size.and_then(|s| s.get("width")).and_then(|v| v.as_u64()).unwrap_or(0).min(65536);
-                let h = size.and_then(|s| s.get("height")).and_then(|v| v.as_u64()).unwrap_or(0).min(65536);
+                let w = size
+                    .and_then(|s| s.get("width"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .min(65536);
+                let h = size
+                    .and_then(|s| s.get("height"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .min(65536);
                 items.push(Item::new(kind, &bytes).size(w as u32, h as u32));
             }
         }
@@ -149,13 +161,20 @@ pub fn output_of(o: &Value) -> Output {
             } else {
                 OutputKind::Stdout
             };
-            Output::new(kind, vec![Item::ansi(&text_of(o.get("text").unwrap_or(&Value::Null)))])
+            Output::new(
+                kind,
+                vec![Item::ansi(&text_of(o.get("text").unwrap_or(&Value::Null)))],
+            )
         }
         "error" => {
             let tb: Vec<String> = o
                 .get("traceback")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             let text = if tb.is_empty() {
                 format!(
@@ -171,7 +190,11 @@ pub fn output_of(o: &Value) -> Output {
             out
         }
         _ => {
-            let kind = if ty == "execute_result" { OutputKind::Result } else { OutputKind::Display };
+            let kind = if ty == "execute_result" {
+                OutputKind::Result
+            } else {
+                OutputKind::Display
+            };
             let empty = Map::new();
             let data = o.get("data").and_then(|v| v.as_object()).unwrap_or(&empty);
             let mut out = Output::new(kind, items_of(data, o.get("metadata")));
@@ -186,7 +209,10 @@ pub fn language(nb: &Value) -> String {
     let md = nb.get("metadata");
     md.and_then(|m| m.get("kernelspec"))
         .and_then(|k| k.get("language"))
-        .or_else(|| md.and_then(|m| m.get("language_info")).and_then(|l| l.get("name")))
+        .or_else(|| {
+            md.and_then(|m| m.get("language_info"))
+                .and_then(|l| l.get("name"))
+        })
         .and_then(|v| v.as_str())
         .unwrap_or("python")
         .replace(' ', "_")
@@ -196,13 +222,20 @@ pub fn language(nb: &Value) -> String {
 pub fn read(data: &[u8]) -> Result<Notebook, String> {
     if data.iter().all(|b| b.is_ascii_whitespace()) {
         let meta = json!({"metadata": {}, "nbformat": 4, "nbformat_minor": 5});
-        return Ok(Notebook { meta: serde_json::to_vec(&meta).unwrap(), cells: Vec::new() });
+        return Ok(Notebook {
+            meta: serde_json::to_vec(&meta).unwrap(),
+            cells: Vec::new(),
+        });
     }
     let v: Value = serde_json::from_slice(data).map_err(|e| format!("not a notebook: {e}"))?;
-    let obj = v.as_object().ok_or("not a notebook: the file is not a JSON object")?;
+    let obj = v
+        .as_object()
+        .ok_or("not a notebook: the file is not a JSON object")?;
     let major = obj.get("nbformat").and_then(|v| v.as_u64()).unwrap_or(0);
     if major != 4 {
-        return Err(format!("nbformat {major}: only nbformat 4 notebooks are read"));
+        return Err(format!(
+            "nbformat {major}: only nbformat 4 notebooks are read"
+        ));
     }
     let lang = language(&v);
     let mut meta = obj.clone();
@@ -210,7 +243,10 @@ pub fn read(data: &[u8]) -> Result<Notebook, String> {
     let mut cells = Vec::new();
     for c in cells_v.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
         let Some(co) = c.as_object() else { continue };
-        let ty = co.get("cell_type").and_then(|v| v.as_str()).unwrap_or("code");
+        let ty = co
+            .get("cell_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("code");
         let source = text_of(co.get("source").unwrap_or(&Value::Null));
         let mut cmeta = co.clone();
         cmeta.remove("source");
@@ -220,7 +256,10 @@ pub fn read(data: &[u8]) -> Result<Notebook, String> {
             cell.count = co.get("execution_count").and_then(|v| v.as_u64());
             cmeta.remove("execution_count");
             if let Some(outs) = cmeta.remove("outputs") {
-                cell.outputs = outs.as_array().map(|a| a.iter().map(output_of).collect()).unwrap_or_default();
+                cell.outputs = outs
+                    .as_array()
+                    .map(|a| a.iter().map(output_of).collect())
+                    .unwrap_or_default();
             }
             cell
         } else {
@@ -233,15 +272,26 @@ pub fn read(data: &[u8]) -> Result<Notebook, String> {
         cell.meta = serde_json::to_vec(&Value::Object(cmeta)).unwrap();
         cells.push(cell);
     }
-    Ok(Notebook { meta: serde_json::to_vec(&Value::Object(meta)).unwrap(), cells })
+    Ok(Notebook {
+        meta: serde_json::to_vec(&Value::Object(meta)).unwrap(),
+        cells,
+    })
 }
 
 /// An output as nbformat writes it: its KEEP JSON, or a stream made from its text.
 pub fn output_json(o: &Output) -> Value {
-    let text = o.items.first().map(|i| String::from_utf8_lossy(&i.data).into_owned()).unwrap_or_default();
+    let text = o
+        .items
+        .first()
+        .map(|i| String::from_utf8_lossy(&i.data).into_owned())
+        .unwrap_or_default();
     match o.kind {
         OutputKind::Stdout | OutputKind::Stderr => {
-            let name = if o.kind == OutputKind::Stderr { "stderr" } else { "stdout" };
+            let name = if o.kind == OutputKind::Stderr {
+                "stderr"
+            } else {
+                "stdout"
+            };
             json!({"name": name, "output_type": "stream", "text": lines_of(&text)})
         }
         _ => {
@@ -253,7 +303,11 @@ pub fn output_json(o: &Output) -> Value {
             if o.kind == OutputKind::Error {
                 json!({"ename": "Error", "evalue": text, "output_type": "error", "traceback": text.lines().collect::<Vec<_>>()})
             } else {
-                let ty = if o.kind == OutputKind::Result { "execute_result" } else { "display_data" };
+                let ty = if o.kind == OutputKind::Result {
+                    "execute_result"
+                } else {
+                    "display_data"
+                };
                 let mut v = json!({"data": {"text/plain": lines_of(&text)}, "metadata": {}, "output_type": ty});
                 if ty == "execute_result" {
                     v["execution_count"] = Value::Null;
@@ -280,7 +334,10 @@ pub fn write(nb: &Notebook, patch: &[(&str, Value)]) -> Result<Vec<u8>, String> 
     }
     top.entry("nbformat").or_insert(json!(4));
     top.entry("nbformat_minor").or_insert(json!(5));
-    let minor = top.get("nbformat_minor").and_then(|v| v.as_u64()).unwrap_or(5);
+    let minor = top
+        .get("nbformat_minor")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5);
     let metas: Vec<Map<String, Value>> = nb
         .cells
         .iter()
@@ -289,7 +346,10 @@ pub fn write(nb: &Notebook, patch: &[(&str, Value)]) -> Result<Vec<u8>, String> 
             _ => Map::new(),
         })
         .collect();
-    let mut ids: Vec<String> = metas.iter().filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    let mut ids: Vec<String> = metas
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
     let mut cells = Vec::new();
     for (i, (c, mut co)) in nb.cells.iter().zip(metas).enumerate() {
         co.entry("metadata").or_insert_with(|| json!({}));
@@ -311,8 +371,14 @@ pub fn write(nb: &Notebook, patch: &[(&str, Value)]) -> Result<Vec<u8>, String> 
         match c.kind {
             CellKind::Code => {
                 co.insert("cell_type".into(), json!("code"));
-                co.insert("execution_count".into(), c.count.map(Value::from).unwrap_or(Value::Null));
-                co.insert("outputs".into(), Value::Array(c.outputs.iter().map(output_json).collect()));
+                co.insert(
+                    "execution_count".into(),
+                    c.count.map(Value::from).unwrap_or(Value::Null),
+                );
+                co.insert(
+                    "outputs".into(),
+                    Value::Array(c.outputs.iter().map(output_json).collect()),
+                );
             }
             CellKind::Markup => {
                 let raw = co.get("cell_type").and_then(|v| v.as_str()) == Some("raw");
@@ -338,7 +404,11 @@ pub fn write(nb: &Notebook, patch: &[(&str, Value)]) -> Result<Vec<u8>, String> 
 /// saving twice writes the same file.
 fn cell_hash(i: usize, salt: u32) -> u32 {
     let mut h: u32 = 2166136261;
-    for b in (i as u32).to_le_bytes().into_iter().chain(salt.to_le_bytes()) {
+    for b in (i as u32)
+        .to_le_bytes()
+        .into_iter()
+        .chain(salt.to_le_bytes())
+    {
         h = (h ^ b as u32).wrapping_mul(16777619);
     }
     h
@@ -436,10 +506,18 @@ mod tests {
     fn new_and_edited() {
         let mut nb = read(b"").unwrap();
         nb.cells.push(Cell::code("python", b"x = 1\ny = 2"));
-        let out = String::from_utf8(write(&nb, &[("language_info", json!({"name": "python"}))]).unwrap()).unwrap();
-        assert!(out.contains("\"language_info\": {\n   \"name\": \"python\"\n  }"), "{out}");
+        let out =
+            String::from_utf8(write(&nb, &[("language_info", json!({"name": "python"}))]).unwrap())
+                .unwrap();
+        assert!(
+            out.contains("\"language_info\": {\n   \"name\": \"python\"\n  }"),
+            "{out}"
+        );
         assert!(out.contains("\"id\": \""), "{out}");
-        assert!(out.contains("\"source\": [\n    \"x = 1\\n\",\n    \"y = 2\"\n   ]"), "{out}");
+        assert!(
+            out.contains("\"source\": [\n    \"x = 1\\n\",\n    \"y = 2\"\n   ]"),
+            "{out}"
+        );
         assert!(read(b"{\"nbformat\": 3}").is_err());
         assert!(read(b"not json").is_err());
     }
@@ -454,19 +532,52 @@ mod tests {
     #[test]
     fn rich_items_and_readable_stand_ins() {
         // a DataFrame: its table as a rich document, then pandas' own text
-        let k = kinds(json!({"text/html": "<table><tr><th>a</th></tr><tr><td>1</td></tr></table>", "text/plain": "   a\n0  1"}));
-        assert_eq!(k[0], ("rich".into(), "1\ndoc 20\n| a |\n| --- |\n| 1 |\n".into()));
+        let k = kinds(
+            json!({"text/html": "<table><tr><th>a</th></tr><tr><td>1</td></tr></table>", "text/plain": "   a\n0  1"}),
+        );
+        assert_eq!(
+            k[0],
+            ("rich".into(), "1\ndoc 20\n| a |\n| --- |\n| 1 |\n".into())
+        );
         assert_eq!(k[1], ("ansi".into(), "   a\n0  1".into()));
         // HTML(...) and JSON(...): their text before the repr that says nothing
-        let k = kinds(json!({"text/html": "<b>hi</b> there", "text/plain": "<IPython.core.display.HTML object>"}));
-        assert_eq!(k.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["rich", "text", "ansi"]);
+        let k = kinds(
+            json!({"text/html": "<b>hi</b> there", "text/plain": "<IPython.core.display.HTML object>"}),
+        );
+        assert_eq!(
+            k.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            ["rich", "text", "ansi"]
+        );
         assert_eq!(k[1].1, "hi there\n");
-        let k = kinds(json!({"application/json": {"a": [1, 2]}, "text/plain": "<IPython.core.display.JSON object>"}));
-        assert_eq!(k[0], ("text".into(), "{\n  \"a\": [\n    1,\n    2\n  ]\n}\n".into()));
-        let k = kinds(json!({"text/markdown": "# T", "text/plain": "<IPython.core.display.Markdown object>"}));
-        assert_eq!(k.iter().map(|(k, d)| (k.as_str(), d.as_str())).collect::<Vec<_>>(),
-                   [("rich", "1\ndoc 3\n# T"), ("text", "# T"), ("ansi", "<IPython.core.display.Markdown object>")]);
-        assert_eq!(kinds(json!({"application/vnd.jupyter.widget-view+json": {}})),
-                   [("text".to_string(), "[application/vnd.jupyter.widget-view+json]".to_string())]);
+        let k = kinds(
+            json!({"application/json": {"a": [1, 2]}, "text/plain": "<IPython.core.display.JSON object>"}),
+        );
+        assert_eq!(
+            k[0],
+            (
+                "text".into(),
+                "{\n  \"a\": [\n    1,\n    2\n  ]\n}\n".into()
+            )
+        );
+        let k = kinds(
+            json!({"text/markdown": "# T", "text/plain": "<IPython.core.display.Markdown object>"}),
+        );
+        assert_eq!(
+            k.iter()
+                .map(|(k, d)| (k.as_str(), d.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("rich", "1\ndoc 3\n# T"),
+                ("text", "# T"),
+                ("ansi", "<IPython.core.display.Markdown object>")
+            ]
+        );
+        assert_eq!(
+            kinds(json!({"application/vnd.jupyter.widget-view+json": {}})),
+            [(
+                "text".to_string(),
+                "[application/vnd.jupyter.widget-view+json]".to_string()
+            )]
+        );
     }
 }

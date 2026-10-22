@@ -8,10 +8,12 @@ mod zmtp;
 
 use kernel::{Candidate, Kernel, Launcher, LocalLauncher, Op, Proc, Sink};
 use rhun_ext::notebook::{
-    CellId, Command, ExecId, ExecSignal, KernelState, NbId, NbOpen, NbRun, NbSave, Notebook, Output, OutputOp, RunId,
-    RunState,
+    CellId, Command, ExecId, ExecSignal, KernelState, NbId, NbOpen, NbRun, NbSave, Notebook,
+    Output, OutputOp, RunId, RunState,
 };
-use rhun_ext::{CompleteRequest, CompletionItem, CompletionList, Doc, Ext, Feature, Handler, Kind, Pos, Range};
+use rhun_ext::{
+    CompleteRequest, CompletionItem, CompletionList, Doc, Ext, Feature, Handler, Kind, Pos, Range,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,7 +60,14 @@ struct ExecProc {
 }
 
 impl Launcher for ExecLauncher {
-    fn launch(&self, nb: NbId, argv: &[String], cwd: &Path, env: &[(String, String)], log: &Path) -> Result<Box<dyn Proc>, String> {
+    fn launch(
+        &self,
+        nb: NbId,
+        argv: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<Box<dyn Proc>, String> {
         let cmd = Command {
             program: argv[0].clone(),
             dir: cwd.display().to_string(),
@@ -90,7 +99,9 @@ impl Proc for ExecProc {
         self.exits.lock().unwrap().contains_key(&self.exec)
     }
     fn interrupt(&self) -> bool {
-        self.ext.nb_exec_signal(self.exec, ExecSignal::Interrupt).is_ok()
+        self.ext
+            .nb_exec_signal(self.exec, ExecSignal::Interrupt)
+            .is_ok()
     }
     fn kill(&self) {
         let _ = self.ext.nb_exec_signal(self.exec, ExecSignal::Kill);
@@ -174,7 +185,13 @@ impl Ctx {
 
     fn fail_runs(&self, nb: NbId, runs: &[NbRun], why: &str) {
         for r in runs {
-            self.sink.output(nb, r.cell, r.run, Op::Append, Some(&kernel::message_output(why)));
+            self.sink.output(
+                nb,
+                r.cell,
+                r.run,
+                Op::Append,
+                Some(&kernel::message_output(why)),
+            );
             self.sink.state(nb, r.cell, r.run, RunState::Failed, None);
         }
     }
@@ -188,7 +205,12 @@ impl Ctx {
             let Some(n) = nbs.get(&nb) else { return };
             (n.choice.clone(), n.spec_name.clone())
         };
-        let choice = choice.or_else(|| kernel::default_choice(&kernel::discover(&dir, self.project.as_deref()), spec_name.as_deref()));
+        let choice = choice.or_else(|| {
+            kernel::default_choice(
+                &kernel::discover(&dir, self.project.as_deref()),
+                spec_name.as_deref(),
+            )
+        });
         let Some(cand) = choice else {
             let runs = self.stop_starting(nb);
             self.sink.label(nb, KernelState::Dead, "No kernel");
@@ -196,7 +218,14 @@ impl Ctx {
             return;
         };
         self.sink.label(nb, KernelState::Starting, &cand.label);
-        match Kernel::start(nb, &cand, &dir, &self.state, self.sink.clone(), self.launcher.as_ref()) {
+        match Kernel::start(
+            nb,
+            &cand,
+            &dir,
+            &self.state,
+            self.sink.clone(),
+            self.launcher.as_ref(),
+        ) {
             Ok(k) => {
                 let mut nbs = self.nbs.lock().unwrap();
                 let Some(n) = nbs.get_mut(&nb) else {
@@ -219,13 +248,22 @@ impl Ctx {
                     self.sink.label(nb, KernelState::Idle, &cand.label);
                 }
                 for (r, e) in failed {
-                    self.fail_runs(nb, &[r], &format!("The cell could not be sent to the kernel: {e}"));
+                    self.fail_runs(
+                        nb,
+                        &[r],
+                        &format!("The cell could not be sent to the kernel: {e}"),
+                    );
                 }
             }
             Err(e) => {
                 let runs = self.stop_starting(nb);
-                self.sink.label(nb, KernelState::Dead, &format!("{} (failed)", cand.label));
-                self.fail_runs(nb, &runs, &format!("The kernel {} did not start: {e}", cand.label));
+                self.sink
+                    .label(nb, KernelState::Dead, &format!("{} (failed)", cand.label));
+                self.fail_runs(
+                    nb,
+                    &runs,
+                    &format!("The kernel {} did not start: {e}", cand.label),
+                );
             }
         }
     }
@@ -269,13 +307,28 @@ impl Ctx {
 
 impl App {
     fn ctx(&mut self, ext: &Ext) -> Ctx {
-        let sink = self.sink.get_or_insert_with(|| Arc::new(ExtSink(ext.clone()))).clone();
+        let sink = self
+            .sink
+            .get_or_insert_with(|| Arc::new(ExtSink(ext.clone())))
+            .clone();
         let (exits, state) = (self.exits.clone(), self.state.clone());
         let launcher = self
             .launcher
-            .get_or_insert_with(|| Arc::new(ExecLauncher { ext: ext.clone(), state, exits }))
+            .get_or_insert_with(|| {
+                Arc::new(ExecLauncher {
+                    ext: ext.clone(),
+                    state,
+                    exits,
+                })
+            })
             .clone();
-        Ctx { nbs: self.nbs.clone(), sink, launcher, project: self.project.clone(), state: self.state.clone() }
+        Ctx {
+            nbs: self.nbs.clone(),
+            sink,
+            launcher,
+            project: self.project.clone(),
+            state: self.state.clone(),
+        }
     }
 }
 
@@ -289,8 +342,14 @@ impl Handler for App {
         let meta: Value = serde_json::from_slice(&nb.meta).unwrap_or(Value::Null);
         let spec = meta.get("metadata").and_then(|m| m.get("kernelspec"));
         let mut n = Nb::new(PathBuf::from(&req.path));
-        n.spec_name = spec.and_then(|s| s.get("name")).and_then(|v| v.as_str()).map(str::to_string);
-        n.spec_label = spec.and_then(|s| s.get("display_name")).and_then(|v| v.as_str()).map(str::to_string);
+        n.spec_name = spec
+            .and_then(|s| s.get("name"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        n.spec_label = spec
+            .and_then(|s| s.get("display_name"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let label = n.spec_label.clone().unwrap_or_else(|| "Python".to_string());
         let ctx = self.ctx(ext);
         let id = req.nb;
@@ -332,15 +391,21 @@ impl Handler for App {
 
     fn nb_run(&mut self, ext: &Ext, run: &NbRun) {
         let ctx = self.ctx(ext);
-        ctx.sink.state(run.nb, run.cell, run.run, RunState::Queued, None);
+        ctx.sink
+            .state(run.nb, run.cell, run.run, RunState::Queued, None);
         let mut nbs = self.nbs.lock().unwrap();
         let n = nbs.entry(run.nb).or_insert_with(|| Nb::new(PathBuf::new()));
         match &n.kernel {
             Ks::Ready(k) => {
                 let k = k.clone();
-                if let Err(e) = k.execute(run.cell, run.run, &String::from_utf8_lossy(&run.source)) {
+                if let Err(e) = k.execute(run.cell, run.run, &String::from_utf8_lossy(&run.source))
+                {
                     drop(nbs);
-                    ctx.fail_runs(run.nb, std::slice::from_ref(run), &format!("The cell could not be sent to the kernel: {e}"));
+                    ctx.fail_runs(
+                        run.nb,
+                        std::slice::from_ref(run),
+                        &format!("The cell could not be sent to the kernel: {e}"),
+                    );
                 }
             }
             Ks::Starting => n.queue.push(run.clone()),
@@ -385,7 +450,12 @@ impl Handler for App {
                 let _ = ext.toast("No Python was found on PATH or in the project's environments");
                 return;
             }
-            let current = ctx.nbs.lock().unwrap().get(&nb).and_then(|n| n.choice.as_ref().map(|c| c.argv.clone()));
+            let current = ctx
+                .nbs
+                .lock()
+                .unwrap()
+                .get(&nb)
+                .and_then(|n| n.choice.as_ref().map(|c| c.argv.clone()));
             let items: Vec<String> = cands
                 .iter()
                 .map(|c| {
@@ -400,9 +470,19 @@ impl Handler for App {
                 })
                 .collect();
             let refs: Vec<&str> = items.iter().map(String::as_str).collect();
-            let name = ctx.nbs.lock().unwrap().get(&nb).and_then(|n| n.path.file_name().map(|f| f.to_string_lossy().into_owned())).unwrap_or_default();
-            let Ok(Some(i)) = ext.choose(&format!("Kernel for {name}"), &refs) else { return };
-            let Some(cand) = cands.get(i).cloned() else { return };
+            let name = ctx
+                .nbs
+                .lock()
+                .unwrap()
+                .get(&nb)
+                .and_then(|n| n.path.file_name().map(|f| f.to_string_lossy().into_owned()))
+                .unwrap_or_default();
+            let Ok(Some(i)) = ext.choose(&format!("Kernel for {name}"), &refs) else {
+                return;
+            };
+            let Some(cand) = cands.get(i).cloned() else {
+                return;
+            };
             {
                 let mut nbs = ctx.nbs.lock().unwrap();
                 let Some(n) = nbs.get_mut(&nb) else { return };
@@ -430,21 +510,32 @@ impl Handler for App {
 
     /// Completion in a cell, from its notebook's kernel (complete_request); none elsewhere.
     fn complete(&mut self, ext: &Ext, req: &CompleteRequest) -> CompletionList {
-        let Some(nb) = self.cells.get(&req.doc).copied() else { return CompletionList::default() };
+        let Some(nb) = self.cells.get(&req.doc).copied() else {
+            return CompletionList::default();
+        };
         let kernel = match self.nbs.lock().unwrap().get(&nb).map(|n| &n.kernel) {
             Some(Ks::Ready(k)) => k.clone(),
             _ => return CompletionList::default(),
         };
-        let Ok((text, _)) = ext.text(req.doc) else { return CompletionList::default() };
+        let Ok((text, _)) = ext.text(req.doc) else {
+            return CompletionList::default();
+        };
         let text = String::from_utf8_lossy(&text).into_owned();
-        let Some(at) = byte_at(&text, req.at) else { return CompletionList::default() };
+        let Some(at) = byte_at(&text, req.at) else {
+            return CompletionList::default();
+        };
         let cursor = text[..at].chars().count();
-        let Some(reply) = kernel.complete(&text, cursor) else { return CompletionList::default() };
+        let Some(reply) = kernel.complete(&text, cursor) else {
+            return CompletionList::default();
+        };
         let chars = |key: &str| reply.get(key).and_then(|v| v.as_u64()).map(|n| n as usize);
         let (Some(start), Some(end)) = (chars("cursor_start"), chars("cursor_end")) else {
             return CompletionList::default();
         };
-        let range = Range::new(pos_of(&text, char_byte(&text, start)), pos_of(&text, char_byte(&text, end)));
+        let range = Range::new(
+            pos_of(&text, char_byte(&text, start)),
+            pos_of(&text, char_byte(&text, end)),
+        );
         let items = reply
             .get("matches")
             .and_then(|m| m.as_array())
@@ -461,7 +552,11 @@ impl Handler for App {
 
     fn nb_closed(&mut self, _ext: &Ext, nb: NbId) {
         let n = self.nbs.lock().unwrap().remove(&nb);
-        if let Some(Nb { kernel: Ks::Ready(k), .. }) = n {
+        if let Some(Nb {
+            kernel: Ks::Ready(k),
+            ..
+        }) = n
+        {
             thread::spawn(move || k.shutdown(false));
         }
     }
@@ -496,7 +591,10 @@ fn byte_at(text: &str, at: Pos) -> Option<usize> {
 
 /// The byte offset of the n-th character.
 fn char_byte(text: &str, n: usize) -> usize {
-    text.char_indices().nth(n).map(|(b, _)| b).unwrap_or(text.len())
+    text.char_indices()
+        .nth(n)
+        .map(|(b, _)| b)
+        .unwrap_or(text.len())
 }
 
 /// The position of a byte offset.

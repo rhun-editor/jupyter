@@ -37,7 +37,9 @@ fn tokens(html: &str) -> Vec<Tok> {
                 continue;
             }
             let name_start = i + 1 + usize::from(b.get(i + 1) == Some(&b'/'));
-            if b.get(name_start).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'!' || *c == b'?') {
+            if b.get(name_start)
+                .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'!' || *c == b'?')
+            {
                 let end = tag_end(b, i);
                 if !text.is_empty() {
                     out.push(Tok::Text(decode(&std::mem::take(&mut text))));
@@ -52,7 +54,9 @@ fn tokens(html: &str) -> Vec<Tok> {
                     continue;
                 }
                 let inner = inner.trim_end_matches('/');
-                let n = inner.find(|c: char| c.is_whitespace()).unwrap_or(inner.len());
+                let n = inner
+                    .find(|c: char| c.is_whitespace())
+                    .unwrap_or(inner.len());
                 let name = inner[..n].to_ascii_lowercase();
                 let attrs = attributes(&inner[n..]);
                 if name == "script" || name == "style" || name == "head" {
@@ -159,7 +163,9 @@ fn decode(s: &str) -> String {
             "hellip" => Some('\u{2026}'),
             "mdash" => Some('\u{2014}'),
             "ndash" => Some('\u{2013}'),
-            _ if e.starts_with("#x") || e.starts_with("#X") => u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32),
+            _ if e.starts_with("#x") || e.starts_with("#X") => u32::from_str_radix(&e[2..], 16)
+                .ok()
+                .and_then(char::from_u32),
             _ if e.starts_with('#') => e[1..].parse().ok().and_then(char::from_u32),
             _ => None,
         });
@@ -189,7 +195,7 @@ struct Table {
 struct Conv {
     mode: Mode,
     out: String,
-    line: String, // the inline text of the block being made
+    line: String,            // the inline text of the block being made
     lists: Vec<Option<u32>>, // None bullet, Some(n) ordered at n
     quote: usize,
     pre: usize,
@@ -274,11 +280,19 @@ impl Conv {
     /// The block made so far into the output, with its quote and list prefixes.
     fn flush(&mut self) {
         let line = std::mem::take(&mut self.line);
-        let body = if self.pre > 0 { line.trim_matches('\n').to_string() } else { line.trim().to_string() };
+        let body = if self.pre > 0 {
+            line.trim_matches('\n').to_string()
+        } else {
+            line.trim().to_string()
+        };
         if body.is_empty() {
             return;
         }
-        let quote = if self.md() { "> ".repeat(self.quote) } else { "  ".repeat(self.quote) };
+        let quote = if self.md() {
+            "> ".repeat(self.quote)
+        } else {
+            "  ".repeat(self.quote)
+        };
         let indent = "   ".repeat(self.lists.len().saturating_sub(1));
         for l in body.lines() {
             self.out.push_str(&quote);
@@ -311,10 +325,16 @@ impl Conv {
     }
 
     fn open(&mut self, name: &str, attrs: &[(String, String)]) {
-        let attr = |k: &str| attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+        let attr = |k: &str| {
+            attrs
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
         match name {
-            "p" | "div" | "section" | "article" | "header" | "footer" | "figure" | "figcaption" | "dl" | "dt" | "dd"
-            | "details" | "summary" | "center" => self.block(),
+            "p" | "div" | "section" | "article" | "header" | "footer" | "figure" | "figcaption"
+            | "dl" | "dt" | "dd" | "details" | "summary" | "center" => self.block(),
             "br" => {
                 if self.cell.is_some() {
                     self.push(" ");
@@ -327,7 +347,11 @@ impl Conv {
             "hr" => {
                 self.block();
                 if self.cell.is_none() {
-                    self.out.push_str(if self.md() { "---\n\n" } else { "----------\n\n" });
+                    self.out.push_str(if self.md() {
+                        "---\n\n"
+                    } else {
+                        "----------\n\n"
+                    });
                 }
             }
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
@@ -369,7 +393,8 @@ impl Conv {
             "ul" | "ol" => {
                 self.block();
                 let start = attr("start").parse().unwrap_or(1);
-                self.lists.push(if name == "ol" { Some(start) } else { None });
+                self.lists
+                    .push(if name == "ol" { Some(start) } else { None });
             }
             "li" => {
                 self.block();
@@ -389,7 +414,13 @@ impl Conv {
             }
             "table" => {
                 self.block();
-                self.tables.push(Table { rows: Vec::new(), head: 0, row: None, row_th: true, in_head: false });
+                self.tables.push(Table {
+                    rows: Vec::new(),
+                    head: 0,
+                    row: None,
+                    row_th: true,
+                    in_head: false,
+                });
             }
             "thead" => {
                 if let Some(t) = self.tables.last_mut() {
@@ -433,8 +464,9 @@ impl Conv {
 
     fn close(&mut self, name: &str) {
         match name {
-            "p" | "div" | "section" | "article" | "header" | "footer" | "figure" | "figcaption" | "dl" | "dt" | "dd"
-            | "details" | "summary" | "center" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" => self.block(),
+            "p" | "div" | "section" | "article" | "header" | "footer" | "figure" | "figcaption"
+            | "dl" | "dt" | "dd" | "details" | "summary" | "center" | "h1" | "h2" | "h3" | "h4"
+            | "h5" | "h6" | "li" => self.block(),
             "b" | "strong" if self.md() && self.pre == 0 => self.push("**"),
             "i" | "em" if self.md() && self.pre == 0 => self.push("*"),
             "s" | "del" | "strike" if self.md() && self.pre == 0 => self.push("~~"),
@@ -512,10 +544,14 @@ impl Conv {
             return;
         }
         let cols = t.rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        let rows: Vec<Vec<String>> = t.rows.into_iter().map(|mut r| {
-            r.resize(cols, String::new());
-            r
-        }).collect();
+        let rows: Vec<Vec<String>> = t
+            .rows
+            .into_iter()
+            .map(|mut r| {
+                r.resize(cols, String::new());
+                r
+            })
+            .collect();
         let text = if self.md() {
             // one header row: the first; the other header rows (pandas' index name row) are body rows
             let mut s = String::new();
@@ -537,7 +573,9 @@ impl Conv {
             }
             s
         } else {
-            let widths: Vec<usize> = (0..cols).map(|i| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0)).collect();
+            let widths: Vec<usize> = (0..cols)
+                .map(|i| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0))
+                .collect();
             let mut s = String::new();
             for (ri, r) in rows.iter().enumerate() {
                 let mut l = String::new();
@@ -632,8 +670,14 @@ mod tests {
 
     #[test]
     fn markdown_characters_in_text_are_escaped() {
-        assert_eq!((to_markdown("<p>a*b_c [d] #e</p>")), "a\\*b\\_c \\[d\\] \\#e\n");
-        assert_eq!((to_text("<p>a*b &lt;tag&gt; &#x41;&#66;</p>")), "a*b <tag> AB\n");
+        assert_eq!(
+            (to_markdown("<p>a*b_c [d] #e</p>")),
+            "a\\*b\\_c \\[d\\] \\#e\n"
+        );
+        assert_eq!(
+            (to_text("<p>a*b &lt;tag&gt; &#x41;&#66;</p>")),
+            "a*b <tag> AB\n"
+        );
     }
 
     #[test]

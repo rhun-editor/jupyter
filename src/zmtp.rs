@@ -33,7 +33,9 @@ impl Socket {
         let mut peer = [0u8; 64];
         s.stream.read_exact(&mut peer)?;
         if peer[0] != 0xff || peer[9] != 0x7f || peer[10] < 3 || &peer[12..16] != b"NULL" {
-            return Err(bad("the kernel's port does not speak ZMTP 3 with the NULL mechanism"));
+            return Err(bad(
+                "the kernel's port does not speak ZMTP 3 with the NULL mechanism",
+            ));
         }
         let mut ready = Vec::new();
         ready.push(5u8);
@@ -55,7 +57,9 @@ impl Socket {
     }
 
     pub fn try_clone(&self) -> io::Result<Socket> {
-        Ok(Socket { stream: self.stream.try_clone()? })
+        Ok(Socket {
+            stream: self.stream.try_clone()?,
+        })
     }
 
     pub fn close(&self) {
